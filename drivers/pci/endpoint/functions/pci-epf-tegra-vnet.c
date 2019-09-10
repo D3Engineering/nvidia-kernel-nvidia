@@ -922,6 +922,7 @@ static void process_ctrl_msg(struct work_struct *work)
 	struct ep_ring_buf *ep_ring_buf = &tvnet->ep_ring_buf;
 	struct ep_own_cnt *ep_cnt = ep_ring_buf->ep_cnt;
 	struct ctrl_msg msg;
+    msg.msg_id = CTRL_MSG_LINK_UP;
 
 	while (tvnet_ivc_rd_available(ep_cnt, host_cnt, H2EP_CTRL)) {
 		tvnet_read_ctrl_msg(tvnet, &msg);
