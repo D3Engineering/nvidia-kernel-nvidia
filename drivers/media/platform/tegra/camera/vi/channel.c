@@ -44,7 +44,7 @@
 
 #include "mipical/mipi_cal.h"
 
-#include "linux/nvhost_nvcsi_ioctl.h"
+#include <uapi/linux/nvhost_nvcsi_ioctl.h>
 #include "nvcsi/nvcsi.h"
 #include "nvcsi/deskew.h"
 
@@ -148,6 +148,25 @@ static u32 get_aligned_buffer_size(struct tegra_channel *chan,
 	return size;
 }
 
+static void tegra_channel_set_bytesperline(struct tegra_channel *chan,
+				const struct tegra_video_format *vfmt,
+				struct v4l2_pix_format *pix)
+{
+	unsigned int bpl;
+	unsigned int numerator, denominator;
+	unsigned int align, fmt_align;
+	const struct tegra_frac *bpp = &vfmt->bpp;
+
+	denominator = (!bpp->denominator) ? 1 : bpp->denominator;
+	numerator = (!bpp->numerator) ? 1 : bpp->numerator;
+	fmt_align = (denominator == 1) ? numerator : 1;
+	align = lcm(chan->width_align, fmt_align);
+
+	bpl = (pix->width * numerator) / denominator;
+	pix->bytesperline = tegra_core_bytes_per_line(
+		pix->width, align, vfmt);
+}
+
 static void tegra_channel_fmt_align(struct tegra_channel *chan,
 				const struct tegra_video_format *vfmt,
 				u32 *width, u32 *height, u32 *bytesperline)
@@ -173,6 +192,10 @@ static void tegra_channel_fmt_align(struct tegra_channel *chan,
 	numerator = (!bpp->numerator) ? 1 : bpp->numerator;
 
 	bpl = (*width * numerator) / denominator;
+	/* Align stride */
+	if (chan->vi->fops->vi_stride_align)
+		chan->vi->fops->vi_stride_align(&bpl);
+
 	if (!*bytesperline)
 		*bytesperline = bpl;
 
@@ -212,6 +235,10 @@ static void tegra_channel_update_format(struct tegra_channel *chan,
 	u32 denominator = (!bpp->denominator) ? 1 : bpp->denominator;
 	u32 numerator = (!bpp->numerator) ? 1 : bpp->numerator;
 	u32 bytesperline = (width * numerator / denominator);
+
+	/* Align stride */
+	if (chan->vi->fops->vi_stride_align)
+		chan->vi->fops->vi_stride_align(&bytesperline);
 
 	chan->format.width = width;
 	chan->format.height = height;
@@ -800,7 +827,7 @@ int tegra_channel_write_blobs(struct tegra_channel *chan)
 
 	s_data = to_camera_common_data(sd->dev);
 	if (!s_data)
-		return -EINVAL;
+		return 0;
 
 	if (!is_tvcf_supported(s_data->version))
 		return 0;
@@ -1828,6 +1855,7 @@ __tegra_channel_try_format(struct tegra_channel *chan,
 
 	v4l2_fill_pix_format(pix, &fmt.format);
 
+	tegra_channel_set_bytesperline(chan, vfmt, pix);
 	tegra_channel_fmt_align(chan, vfmt,
 				&pix->width, &pix->height, &pix->bytesperline);
 	pix->sizeimage = get_aligned_buffer_size(chan,

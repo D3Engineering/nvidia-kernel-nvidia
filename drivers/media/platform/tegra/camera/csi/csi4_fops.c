@@ -18,7 +18,7 @@
 #include <media/tegra_camera_core.h>
 #include <media/mc_common.h>
 
-#include "linux/nvhost_ioctl.h"
+#include <uapi/linux/nvhost_ioctl.h>
 #include "mipical/mipi_cal.h"
 #include "nvcsi/nvcsi.h"
 #include "nvhost_acm.h"
@@ -124,6 +124,7 @@ static void csi4_phy_config(
 	unsigned int mipi_clk_mhz = 0;
 	/* Calculated clock settling times for cil and csi clocks */
 	unsigned int cil_settletime = read_settle_time_from_dt(chan);
+	unsigned int discontinuous_clk = read_discontinuous_clk_from_dt(chan);
 	unsigned int csi_settletime;
 	u32 phy_mode = read_phy_mode_from_dt(chan);
 
@@ -229,7 +230,7 @@ static void csi4_phy_config(
 			NVCSI_CIL_A_CONTROL,
 			DEFAULT_DESKEW_COMPARE | DEFAULT_DESKEW_SETTLE |
 			csi_settletime << CLK_SETTLE_SHIFT |
-			T18X_BYPASS_LP_SEQ |
+			!discontinuous_clk << T18X_BYPASS_LP_SEQ_SHIFT |
 			cil_settletime << THS_SETTLE_SHIFT);
 		/* release soft reset */
 		csi4_phy_write(chan, phy_num, NVCSI_CIL_A_SW_RESET, 0x0);
@@ -315,7 +316,7 @@ static void csi4_phy_config(
 				DEFAULT_DESKEW_COMPARE |
 				DEFAULT_DESKEW_SETTLE |
 				csi_settletime << CLK_SETTLE_SHIFT |
-				T18X_BYPASS_LP_SEQ |
+				!discontinuous_clk << T18X_BYPASS_LP_SEQ_SHIFT |
 				cil_settletime << THS_SETTLE_SHIFT);
 			/* release soft reset */
 			csi4_phy_write(chan, phy_num,
@@ -335,7 +336,7 @@ static void csi4_phy_config(
 			NVCSI_CIL_B_CONTROL,
 			DEFAULT_DESKEW_COMPARE | DEFAULT_DESKEW_SETTLE |
 			csi_settletime << CLK_SETTLE_SHIFT |
-			T18X_BYPASS_LP_SEQ |
+			!discontinuous_clk << T18X_BYPASS_LP_SEQ_SHIFT |
 			cil_settletime << THS_SETTLE_SHIFT);
 		/* release soft reset */
 		csi4_phy_write(chan, phy_num, NVCSI_CIL_B_SW_RESET, 0x0);
