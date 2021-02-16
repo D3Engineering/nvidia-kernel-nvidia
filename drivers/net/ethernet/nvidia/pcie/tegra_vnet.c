@@ -600,6 +600,7 @@ static void tvnet_host_setup_bar0_md(struct tvnet_priv *tvnet)
 static void tvnet_host_process_ctrl_msg(struct tvnet_priv *tvnet)
 {
 	struct ctrl_msg msg;
+    msg.msg_id = CTRL_MSG_LINK_UP;
 
 	while (tvnet_ivc_rd_available(&tvnet->ep2h_ctrl)) {
 		tvnet_host_read_ctrl_msg(tvnet, &msg);
