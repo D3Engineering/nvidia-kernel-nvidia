@@ -1,7 +1,7 @@
 /*
  * dp.c: tegra dp driver.
  *
- * Copyright (c) 2011-2019, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2020, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -107,11 +107,6 @@ static inline void tegra_dp_disable_irq(u32 irq)
 {
 	disable_irq(irq);
 }
-
-#define is_hotplug_supported(dp) \
-({ \
-	tegra_dc_is_ext_dp_panel(dp->dc); \
-})
 
 static inline void tegra_dp_pending_hpd(struct tegra_dc_dp_data *dp)
 {
@@ -272,7 +267,7 @@ static inline u64 tegra_div64(u64 dividend, u32 divisor)
 static inline bool tegra_dp_is_audio_supported(struct tegra_dc_dp_data *dp)
 {
 	if (tegra_edid_audio_supported(dp->hpd_data.edid)
-		&& tegra_dc_is_ext_dp_panel(dp->dc) &&
+		&& tegra_dc_is_ext_panel(dp->dc) &&
 		dp->dc->out->type != TEGRA_DC_OUT_FAKE_DP)
 		return true;
 	else
@@ -573,7 +568,7 @@ static ssize_t bits_per_pixel_set(struct file *file, const char __user *buf,
 
 #ifdef CONFIG_SWITCH
 	if (tegra_edid_audio_supported(dp->hpd_data.edid) &&
-		tegra_dc_is_ext_dp_panel(dp->dc) &&
+		tegra_dc_is_ext_panel(dp->dc) &&
 		dp->dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		switch_set_state(&dp->audio_switch, 0);
 		msleep(1);
@@ -1209,7 +1204,7 @@ int tegra_dc_dp_get_max_link_bw(struct tegra_dc_dp_data *dp)
 	}
 
 	/* Constraint #2 */
-	if (tegra_dc_is_ext_dp_panel(dp->dc) && !cfg->ext_dpcd_caps.valid) {
+	if (tegra_dc_is_ext_panel(dp->dc) && !cfg->ext_dpcd_caps.valid) {
 		/* DPCD caps are already read in hpd worker, use them if they
 		 * are valid. Also, use cached values for internal panels as
 		 * they don't change during runtime */
@@ -2044,7 +2039,7 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 			((dc->pdata->flags & TEGRA_DC_FLAG_ENABLED) &&
 			(dc->pdata->flags & TEGRA_DC_FLAG_SET_EARLY_MODE))
 			|| (tegra_fb_is_console_enabled(dc->pdata) &&
-			tegra_dc_is_ext_dp_panel(dc))
+			tegra_dc_is_ext_panel(dc))
 		) &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP
 	) {
@@ -2155,15 +2150,17 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 	}
 
 #ifdef CONFIG_DPHDCP
-	dp->dphdcp = tegra_dphdcp_create(dp, dc->ndev->id,
-		dc->out->ddc_bus);
-	if (IS_ERR_OR_NULL(dp->dphdcp)) {
-		err = PTR_ERR(dp->dphdcp);
-		dev_err(&dc->ndev->dev,
-			"dp hdcp creation failed with err %d\n", err);
-	} else {
-		/* create a /d entry to change the max retries */
-		tegra_dphdcp_debugfs_init(dp->dphdcp);
+	if (dp->sor->hdcp_support) {
+		dp->dphdcp = tegra_dphdcp_create(dp, dc->ndev->id,
+				dc->out->ddc_bus);
+		if (IS_ERR_OR_NULL(dp->dphdcp)) {
+			err = PTR_ERR(dp->dphdcp);
+			dev_err(&dc->ndev->dev,
+				"dp hdcp creation failed with err %d\n", err);
+		} else {
+			/* create a /d entry to change the max retries */
+			tegra_dphdcp_debugfs_init(dp->dphdcp);
+		}
 	}
 #endif
 
@@ -2211,7 +2208,7 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 #endif
 
 #ifdef CONFIG_SWITCH
-	if (tegra_dc_is_ext_dp_panel(dc)) {
+	if (tegra_dc_is_ext_panel(dc)) {
 		err = switch_dev_register(&dp->hpd_data.hpd_switch);
 		if (err)
 			dev_err(&dc->ndev->dev,
@@ -2219,7 +2216,7 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 				__func__, err);
 	}
 
-	if (tegra_dc_is_ext_dp_panel(dc) &&
+	if (tegra_dc_is_ext_panel(dc) &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		err = switch_dev_register(&dp->audio_switch);
 		if (err)
@@ -2230,7 +2227,7 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 #endif
 
 #ifdef CONFIG_TEGRA_HDA_DC
-	if (tegra_dc_is_ext_dp_panel(dc) && dp->sor->audio_support)
+	if (tegra_dc_is_ext_panel(dc) && dp->sor->audio_support)
 		tegra_hda_init(dc, dp);
 #endif
 
@@ -2838,7 +2835,7 @@ static void tegra_dc_dp_enable(struct tegra_dc *dc)
 	}
 
 	/* For eDP, driver gets to decide the best mode. */
-	if (!tegra_dc_is_ext_dp_panel(dc) &&
+	if (!tegra_dc_is_ext_panel(dc) &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		int err;
 
@@ -2923,7 +2920,7 @@ static void tegra_dc_dp_enable(struct tegra_dc *dc)
 	dp->enabled = true;
 
 #ifdef CONFIG_TEGRA_HDA_DC
-	if (tegra_dc_is_ext_dp_panel(dc) && sor->audio_support)
+	if (tegra_dc_is_ext_panel(dc) && sor->audio_support)
 		tegra_hda_enable(dp->hda_handle);
 #endif
 
@@ -2949,7 +2946,7 @@ static void tegra_dc_dp_enable(struct tegra_dc *dc)
 		tegra_dc_sor_attach(dp->sor);
 	}
 #ifdef CONFIG_DPHDCP
-	if (tegra_dc_is_ext_dp_panel(dc) &&
+	if (tegra_dc_is_ext_panel(dc) && dp->dphdcp &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		tegra_dphdcp_set_plug(dp->dphdcp, true);
 	}
@@ -2965,7 +2962,7 @@ static void tegra_dc_dp_enable(struct tegra_dc *dc)
 
 #ifdef CONFIG_SWITCH
 	if (tegra_edid_audio_supported(dp->hpd_data.edid)
-				&& tegra_dc_is_ext_dp_panel(dc) &&
+				&& tegra_dc_is_ext_panel(dc) &&
 				dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		pr_info("dp_audio switch 1\n");
 		switch_set_state(&dp->audio_switch, 1);
@@ -2999,11 +2996,12 @@ static void tegra_dc_dp_destroy(struct tegra_dc *dc)
 		hdmi2fpd_destroy(dc);
 
 #ifdef CONFIG_TEGRA_HDA_DC
-	if (tegra_dc_is_ext_dp_panel(dc) && dp->sor->audio_support)
+	if (tegra_dc_is_ext_panel(dc) && dp->sor->audio_support)
 		tegra_hda_destroy(dp->hda_handle);
 #endif
 
-	tegra_dphdcp_destroy(dp->dphdcp);
+	if (dp->dphdcp)
+		tegra_dphdcp_destroy(dp->dphdcp);
 
 	tegra_dp_dpaux_disable(dp);
 	if (dp->dpaux)
@@ -3025,7 +3023,7 @@ static void tegra_dc_dp_destroy(struct tegra_dc *dc)
 	tegra_dc_dp_debugfs_remove(dp);
 
 #ifdef CONFIG_SWITCH
-	if (tegra_dc_is_ext_dp_panel(dc) &&
+	if (tegra_dc_is_ext_panel(dc) &&
 			dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		switch_dev_unregister(&dp->audio_switch);
 	}
@@ -3051,7 +3049,7 @@ static void tegra_dc_dp_disable(struct tegra_dc *dc)
 	tegra_dc_io_start(dc);
 
 #ifdef CONFIG_DPHDCP
-	if (tegra_dc_is_ext_dp_panel(dc) &&
+	if (tegra_dc_is_ext_panel(dc) && dp->dphdcp &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP)
 		tegra_dphdcp_set_plug(dp->dphdcp, false);
 #endif
@@ -3086,7 +3084,7 @@ static void tegra_dc_dp_disable(struct tegra_dc *dc)
 	tegra_dc_io_end(dc);
 
 #ifdef CONFIG_TEGRA_HDA_DC
-	if (tegra_dc_is_ext_dp_panel(dc) && dp->sor->audio_support)
+	if (tegra_dc_is_ext_panel(dc) && dp->sor->audio_support)
 		tegra_hda_disable(dp->hda_handle);
 #endif
 
@@ -3098,7 +3096,7 @@ static void tegra_dc_dp_disable(struct tegra_dc *dc)
 
 #ifdef CONFIG_SWITCH
 	if (tegra_edid_audio_supported(dp->hpd_data.edid)
-				&& tegra_dc_is_ext_dp_panel(dc) &&
+				&& tegra_dc_is_ext_panel(dc) &&
 				dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		pr_info("dp_audio switch 0\n");
 		switch_set_state(&dp->audio_switch, 0);
@@ -3210,7 +3208,7 @@ static bool tegra_dc_dp_detect(struct tegra_dc *dc)
 	}
 
 	if (tegra_fb_is_console_enabled(dc->pdata) &&
-		!tegra_dc_is_ext_dp_panel(dc) &&
+		!tegra_dc_is_ext_panel(dc) &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		if (dp->hpd_data.mon_spec.modedb_len > 0) {
 			tegra_fb_update_monspecs(dc->fb, &dp->hpd_data.mon_spec,
@@ -3328,8 +3326,8 @@ static bool tegra_dp_mode_filter(const struct tegra_dc *dc,
 			return false;
 	}
 
-	if (mode->pixclock && tegra_dc_get_out_max_pixclock(dc) &&
-		mode->pixclock < tegra_dc_get_out_max_pixclock(dc))
+	/* Check if the mode's pixel clock is more than the max rate*/
+	if (!tegra_dc_valid_pixclock(dc, mode))
 		return false;
 
 	/*

@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2019, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2020, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -57,6 +57,8 @@
 #include <linux/ote_protocol.h>
 #endif
 #include <linux/version.h>
+
+#include <clocksource/arm_arch_timer.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/display.h>
@@ -725,8 +727,9 @@ bool tegra_dc_hotplug_supported(struct tegra_dc *dc)
 	if (dc->out->type == TEGRA_DC_OUT_HDMI)
 		return true;
 	else if (dc->out->type == TEGRA_DC_OUT_DP ||
-			dc->out->type == TEGRA_DC_OUT_FAKE_DP)
-		return tegra_dc_is_ext_dp_panel(dc);
+			dc->out->type == TEGRA_DC_OUT_FAKE_DP ||
+			dc->out->type == TEGRA_DC_OUT_DSI)
+		return tegra_dc_is_ext_panel(dc);
 	else
 		return (dc->out->hotplug_gpio > 0 ? true : false);
 }
@@ -2007,7 +2010,7 @@ static ssize_t dbg_nvdisp_topology_write(struct file *file,
 {
 	int res = 0, ret = 0;
 	int i = 0;
-	char buf[CHAR_BUF_SIZE_MAX] = {'\0'};
+	char buf[CHAR_BUF_SIZE_MAX+1] = {'\0'};
 	struct tegra_dc *primary =  NULL;
 	struct tegra_dc *curr = NULL;
 	bool dangling = false;
@@ -3368,34 +3371,44 @@ unsigned int tegra_dc_has_multiple_dc(void)
 	return (cnt > 1);
 }
 
-static bool tegra_dc_is_out_type_connected(int out_type)
-{
-	unsigned int idx;
-	bool ret = false;
+static const char * const extcon_cable_strings[] = {
+	[TEGRA_DC_OUT_HDMI] = "HDMI",
+	[TEGRA_DC_OUT_DSI] = "DSI",
+	[TEGRA_DC_OUT_DP] = "DP"
+};
 
-	for (idx = 0; idx < tegra_dc_get_numof_dispheads(); idx++) {
-		struct tegra_dc *dc = tegra_dcs[idx];
-
-		if (dc && dc->out && dc->out->type == out_type
-			&& dc->connected) {
-			ret = true;
-			break;
-		}
-	}
-	return ret;
-}
+static const int hdmi_extcon_cable_id[] = {
+	EXTCON_DISP_HDMI,
+	EXTCON_DISP_HDMI2
+};
+/* the map of dc->ctrl_num to the index of tegra_hdmi_extcon_cable_id[] */
+unsigned long extcon_hdmi_dc_map[ARRAY_SIZE(hdmi_extcon_cable_id)] = {
+	[0 ... (ARRAY_SIZE(hdmi_extcon_cable_id) - 1)] = -1};
 
 void tegra_dc_extcon_hpd_notify(struct tegra_dc *dc)
 {
 	unsigned int cable = 0;
+	int i;
 
 	mutex_lock(&tegra_dc_extcon_lock);
 	if (dc && dc->out) {
-		if (dc->out->type == TEGRA_DC_OUT_HDMI) {
-			cable = EXTCON_DISP_HDMI;
-		} else if (dc->out->type == TEGRA_DC_OUT_DP) {
+		switch (dc->out->type) {
+		case TEGRA_DC_OUT_HDMI:
+			cable = EXTCON_NONE;
+			for (i = 0; i < ARRAY_SIZE(hdmi_extcon_cable_id); i++) {
+				if (extcon_hdmi_dc_map[i] == dc->ctrl_num) {
+					cable = hdmi_extcon_cable_id[i];
+					break;
+				}
+			}
+			break;
+		case TEGRA_DC_OUT_DP:
 			cable = EXTCON_DISP_DP;
-		} else {
+			break;
+		case TEGRA_DC_OUT_DSI:
+			cable = EXTCON_DISP_DSIHPD;
+			break;
+		default:
 			mutex_unlock(&tegra_dc_extcon_lock);
 			return;
 		}
@@ -3404,18 +3417,12 @@ void tegra_dc_extcon_hpd_notify(struct tegra_dc *dc)
 			disp_state_extcon_switch_report(cable,
 				EXTCON_DISP_HPD_STATE_ENABLED);
 			pr_info("Extcon %s: HPD enabled\n",
-				cable == EXTCON_DISP_HDMI ? "HDMI" : "DP");
+				extcon_cable_strings[dc->out->type]);
 		} else {
-			/*
-			 * send hpd disable notification only when all
-			 * instances of the given out type are disconnected
-			 */
-			if (!tegra_dc_is_out_type_connected(dc->out->type)) {
-				disp_state_extcon_switch_report(cable,
-					EXTCON_DISP_HPD_STATE_DISABLED);
-				pr_info("Extcon %s: HPD disabled\n",
-					cable == EXTCON_DISP_HDMI ? "HDMI" : "DP");
-			}
+			disp_state_extcon_switch_report(cable,
+				EXTCON_DISP_HPD_STATE_DISABLED);
+			pr_info("Extcon %s: HPD disabled\n",
+				extcon_cable_strings[dc->out->type]);
 		}
 	}
 	mutex_unlock(&tegra_dc_extcon_lock);
@@ -4019,9 +4026,30 @@ static int tegra_dc_set_out(struct tegra_dc *dc, struct tegra_dc_out *out,
 {
 	struct tegra_dc_mode *mode = NULL;
 	int err = 0;
+	int i, free_slot = -1;
 
 	dc->out = out;
 	dc->hotplug_supported = tegra_dc_hotplug_supported(dc);
+
+	if (dc->out->type == TEGRA_DC_OUT_HDMI) {
+		for (i = 0; i < ARRAY_SIZE(hdmi_extcon_cable_id); i++) {
+			/* bail out if the map has already been done */
+			if (extcon_hdmi_dc_map[i] == dc->ctrl_num) {
+				free_slot = i;
+				break;
+			} else if (extcon_hdmi_dc_map[i] == -1) {
+				free_slot = i;
+			}
+		}
+
+		if (unlikely(free_slot == -1)) {
+			dev_err(&dc->ndev->dev,
+				"No free extcon HDMI slot for DC %d\n",
+				dc->ctrl_num);
+		} else {
+			extcon_hdmi_dc_map[free_slot] = dc->ctrl_num;
+		}
+	}
 
 	if (initialized) {
 		dc->initialized = false;
@@ -4207,10 +4235,10 @@ int tegra_dc_get_source_physical_address(u8 *phy_address)
 
 }
 
-bool tegra_dc_is_ext_dp_panel(const struct tegra_dc *dc)
+bool tegra_dc_is_ext_panel(const struct tegra_dc *dc)
 {
 	if (dc && dc->out)
-		return dc->out->is_ext_dp_panel;
+		return dc->out->is_ext_panel;
 	return false;
 }
 
@@ -4252,6 +4280,22 @@ unsigned tegra_dc_get_out_max_pixclock(const struct tegra_dc *dc)
 		return 0;
 }
 EXPORT_SYMBOL(tegra_dc_get_out_max_pixclock);
+
+/*
+ * Check if mode's pixel clock requirement can be satisfied. Note that
+ * the pixclock value is in pico seconds.
+ */
+bool tegra_dc_valid_pixclock(const struct tegra_dc *dc,
+					const struct fb_videomode *mode)
+{
+	unsigned max_pixclock = tegra_dc_get_out_max_pixclock(dc);
+
+	if (max_pixclock)
+		return mode->pixclock >= max_pixclock;
+	else
+		return true;
+}
+EXPORT_SYMBOL(tegra_dc_valid_pixclock);
 
 void tegra_dc_sysfs_enable_crc(struct tegra_dc *dc)
 {
@@ -4972,9 +5016,20 @@ inline u64 tegra_dc_get_tsc_time(void)
 #else
 inline u64 tegra_dc_get_tsc_time(void)
 {
-	/* TBD: Add support for kernel 4.9 */
-	/* arch_timer_get_timecounter() doesn't exist in 4.9 */
-	return 0;
+	u64 frac = 0;
+	const struct cyclecounter *cc;
+	struct arch_timer_kvm_info *info;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0))
+	u64 value;
+#else
+	cycle_t value;
+#endif
+
+	info = arch_timer_get_kvm_info();
+	cc = info->timecounter.cc;
+
+	value = cc->read(cc);
+	return cyclecounter_cyc2ns(cc, value, 0, &frac);
 }
 #endif
 
@@ -5736,7 +5791,8 @@ static bool _tegra_dc_enable(struct tegra_dc *dc)
 	dc->shutdown = false;
 
 	if ((dc->out->type == TEGRA_DC_OUT_HDMI ||
-		dc->out->type == TEGRA_DC_OUT_DP) &&
+		dc->out->type == TEGRA_DC_OUT_DP ||
+		dc->out->type == TEGRA_DC_OUT_DSI) &&
 		!tegra_dc_hpd(dc))
 		return false;
 
@@ -6718,7 +6774,7 @@ static int tegra_dc_probe(struct platform_device *ndev)
 						"could not register isomgr. err=%ld\n",
 						PTR_ERR(dc->isomgr_handle));
 				ret = -ENOENT;
-				goto err_put_clk;
+				goto err_disable_dc;
 			}
 			dc->reserved_bw = tegra_dc_calc_min_bandwidth(dc);
 			/*
@@ -6912,9 +6968,17 @@ err_free:
 static int tegra_dc_remove(struct platform_device *ndev)
 {
 	struct tegra_dc *dc = platform_get_drvdata(ndev);
+	int i;
 
 	if (!dc)
 		return 0;
+
+	if (dc->out->type == TEGRA_DC_OUT_HDMI)
+		for (i = 0; i < ARRAY_SIZE(hdmi_extcon_cable_id); i++)
+			if (extcon_hdmi_dc_map[i] == dc->ctrl_num) {
+				extcon_hdmi_dc_map[i] = -1;
+				break;
+			}
 
 	tegra_dc_remove_sysfs(&dc->ndev->dev);
 	tegra_dc_remove_debugfs(dc);
@@ -7388,6 +7452,14 @@ int tegra_dc_get_numof_dispsors(void)
 }
 EXPORT_SYMBOL(tegra_dc_get_numof_dispsors);
 
+struct tegra_dc_sor_info *tegra_dc_get_sor_cap(void)
+{
+	if (!hw_data || !hw_data->valid)
+		return NULL;
+
+	return hw_data->sor_info;
+}
+
 /* tegra_dc_get_max_lines() - gets v_total for current mode
  * @disp_id : the display id of the concerned head.
  *
@@ -7635,6 +7707,11 @@ inline bool tegra_dc_is_nvdisplay(void)
 }
 EXPORT_SYMBOL(tegra_dc_is_nvdisplay);
 
+static struct tegra_dc_sor_info t21x_sor_info[] = {
+	{ .hdcp_supported = false },  /* SOR0 */
+	{ .hdcp_supported = true },   /* SOR1 */
+};
+
 static void tegra_dc_populate_t21x_hw_data(struct tegra_dc_hw_data *hw_data)
 {
 	if (!hw_data)
@@ -7643,6 +7720,7 @@ static void tegra_dc_populate_t21x_hw_data(struct tegra_dc_hw_data *hw_data)
 	hw_data->nheads = 2;
 	hw_data->nwins = 5;
 	hw_data->nsors = 2;
+	hw_data->sor_info = t21x_sor_info;
 
 	/* unused */
 	hw_data->pd_table = NULL;
