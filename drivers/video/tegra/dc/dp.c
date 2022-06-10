@@ -1,7 +1,7 @@
 /*
  * dp.c: tegra dp driver.
  *
- * Copyright (c) 2011-2019, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2021, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -148,9 +148,16 @@ int tegra_dc_dp_dpcd_read(struct tegra_dc_dp_data *dp, u32 cmd,
 
 	return ret;
 }
-
+static u32 tegra_dp_i2c_functionality(struct i2c_adapter *adapter)
+{
+	return I2C_FUNC_I2C |
+	    I2C_FUNC_SMBUS_EMUL |
+	    I2C_FUNC_SMBUS_READ_BLOCK_DATA |
+	    I2C_FUNC_SMBUS_BLOCK_PROC_CALL |
+	    I2C_FUNC_10BIT_ADDR;
+}
 static int tegra_dc_dp_i2c_xfer(struct tegra_dc *dc, struct i2c_msg *msgs,
-	int num)
+	int num, u32 write_cmd)
 {
 	struct i2c_msg *pmsg;
 	int i;
@@ -170,7 +177,7 @@ static int tegra_dc_dp_i2c_xfer(struct tegra_dc *dc, struct i2c_msg *msgs,
 			len = pmsg->len;
 
 			status = tegra_dc_dpaux_i2c_write(dp->dpaux,
-					DPAUX_DP_AUXCTL_CMD_MOTWR,
+					write_cmd,
 					pmsg->addr, pmsg->buf, &len, &aux_stat);
 			if (status) {
 				dev_err(&dp->dc->ndev->dev,
@@ -202,12 +209,54 @@ static int tegra_dc_dp_i2c_xfer(struct tegra_dc *dc, struct i2c_msg *msgs,
 	return i;
 }
 
+static int tegra_dc_dp_edid_i2c_xfer(struct tegra_dc *dc,
+	    struct i2c_msg *msgs, int num)
+{
+	return tegra_dc_dp_i2c_xfer(dc, msgs, num, DPAUX_DP_AUXCTL_CMD_MOTWR);
+}
+
+static int tegra_dc_dp_ddc_i2c_xfer(struct i2c_adapter *adapter,
+	    struct i2c_msg *msgs, int num)
+{
+	struct tegra_dc *dc = adapter->algo_data;
+
+	if (!dc)
+		return -EINVAL;
+
+	return tegra_dc_dp_i2c_xfer(dc, msgs, num, DPAUX_DP_AUXCTL_CMD_I2CWR);
+}
+static const struct i2c_algorithm tegra_dp_i2c_algo = {
+	.functionality = tegra_dp_i2c_functionality,
+	.master_xfer = tegra_dc_dp_ddc_i2c_xfer,
+};
+
+int tegra_dp_aux_register_i2c_bus(struct tegra_dc_dp_data *dp)
+{
+	dp->ddc.algo = &tegra_dp_i2c_algo;
+	dp->ddc.algo_data = dp->dc;
+	dp->ddc.retries = 3;
+	dp->ddc.class = I2C_CLASS_DDC;
+	dp->ddc.owner = THIS_MODULE;
+	dp->ddc.dev.parent = &dp->dc->ndev->dev;
+	dp->ddc.dev.of_node = dp->dc->ndev->dev.of_node;
+	dp->ddc.nr = dp->dc->ctrl_num + 100;
+
+	strncpy(dp->ddc.name, dev_name(&dp->dc->ndev->dev),
+		    sizeof(dp->ddc.name));
+
+	return i2c_add_numbered_adapter(&dp->ddc);
+}
+
+void tegra_dp_aux_unregister_i2c_bus(struct tegra_dc_dp_data *dp)
+{
+	i2c_del_adapter(&dp->ddc);
+}
 static i2c_transfer_func_t tegra_dp_hpd_op_edid_read(void *drv_data)
 {
 	struct tegra_dc_dp_data *dp = drv_data;
 
 	return (dp->edid_src == EDID_SRC_DT) ?
-		tegra_dc_edid_blob : tegra_dc_dp_i2c_xfer;
+		tegra_dc_edid_blob : tegra_dc_dp_edid_i2c_xfer;
 }
 
 int tegra_dc_dp_dpcd_write(struct tegra_dc_dp_data *dp, u32 cmd,
@@ -2150,15 +2199,17 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 	}
 
 #ifdef CONFIG_DPHDCP
-	dp->dphdcp = tegra_dphdcp_create(dp, dc->ndev->id,
-		dc->out->ddc_bus);
-	if (IS_ERR_OR_NULL(dp->dphdcp)) {
-		err = PTR_ERR(dp->dphdcp);
-		dev_err(&dc->ndev->dev,
-			"dp hdcp creation failed with err %d\n", err);
-	} else {
-		/* create a /d entry to change the max retries */
-		tegra_dphdcp_debugfs_init(dp->dphdcp);
+	if (dp->sor->hdcp_support) {
+		dp->dphdcp = tegra_dphdcp_create(dp, dc->ndev->id,
+				dc->out->ddc_bus);
+		if (IS_ERR_OR_NULL(dp->dphdcp)) {
+			err = PTR_ERR(dp->dphdcp);
+			dev_err(&dc->ndev->dev,
+				"dp hdcp creation failed with err %d\n", err);
+		} else {
+			/* create a /d entry to change the max retries */
+			tegra_dphdcp_debugfs_init(dp->dphdcp);
+		}
 	}
 #endif
 
@@ -2236,6 +2287,10 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 		else
 			tegra_dc_set_fb_mode(dc, &tegra_dc_vga_mode, false);
 	}
+
+	if (tegra_dp_aux_register_i2c_bus(dp))
+		dev_warn(&dc->ndev->dev,
+		    "%s: failed to register i2c adapter\n", __func__);
 
 	tegra_dc_dp_debugfs_create(dp);
 	dp_instance++;
@@ -2944,7 +2999,7 @@ static void tegra_dc_dp_enable(struct tegra_dc *dc)
 		tegra_dc_sor_attach(dp->sor);
 	}
 #ifdef CONFIG_DPHDCP
-	if (tegra_dc_is_ext_panel(dc) &&
+	if (tegra_dc_is_ext_panel(dc) && dp->dphdcp &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		tegra_dphdcp_set_plug(dp->dphdcp, true);
 	}
@@ -2985,6 +3040,8 @@ static void tegra_dc_dp_destroy(struct tegra_dc *dc)
 
 	dp = tegra_dc_get_outdata(dc);
 
+	tegra_dp_aux_unregister_i2c_bus(dp);
+
 	if (dp->dc->out->type != TEGRA_DC_OUT_FAKE_DP) {
 		tegra_dp_disable_irq(dp->irq);
 		tegra_dp_default_int(dp, false);
@@ -2998,7 +3055,8 @@ static void tegra_dc_dp_destroy(struct tegra_dc *dc)
 		tegra_hda_destroy(dp->hda_handle);
 #endif
 
-	tegra_dphdcp_destroy(dp->dphdcp);
+	if (dp->dphdcp)
+		tegra_dphdcp_destroy(dp->dphdcp);
 
 	tegra_dp_dpaux_disable(dp);
 	if (dp->dpaux)
@@ -3046,7 +3104,7 @@ static void tegra_dc_dp_disable(struct tegra_dc *dc)
 	tegra_dc_io_start(dc);
 
 #ifdef CONFIG_DPHDCP
-	if (tegra_dc_is_ext_panel(dc) &&
+	if (tegra_dc_is_ext_panel(dc) && dp->dphdcp &&
 		dc->out->type != TEGRA_DC_OUT_FAKE_DP)
 		tegra_dphdcp_set_plug(dp->dphdcp, false);
 #endif

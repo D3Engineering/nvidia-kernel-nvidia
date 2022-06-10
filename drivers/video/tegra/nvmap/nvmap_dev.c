@@ -3,7 +3,7 @@
  *
  * User-space interface to nvmap
  *
- * Copyright (c) 2011-2018, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2011-2021, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -473,6 +473,10 @@ static long nvmap_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		err = nvmap_ioctl_query_heap_params(filp, uarg);
 		break;
 
+	case NVMAP_IOC_PARAMETERS:
+		err = nvmap_ioctl_query_handle_parameters(filp, uarg);
+		break;
+
 	default:
 		pr_warn("Unknown NVMAP_IOC = 0x%x\n", cmd);
 	}
@@ -573,6 +577,18 @@ next_page:
 	}
 	mutex_unlock(&dev->tags_lock);
 	nvmap_ref_unlock(client);
+}
+
+bool nvmap_memory_available(size_t size)
+{
+	struct sysinfo i;
+
+	si_meminfo(&i);
+	if (size >> PAGE_SHIFT >= i.totalram) {
+		pr_debug("Requested allocation size is more than system memory");
+		return false;
+	}
+	return true;
 }
 
 /* compute the total amount of handle physical memory that is mapped

@@ -30,7 +30,7 @@
  * =========================================================================
  */
 /*
- * Copyright (c) 2015-2020, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015-2021, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -361,14 +361,13 @@ static void eqos_adjust_link(struct net_device *dev)
 			pdata->oldlink = 1;
 			pdata->xstats.link_connect_count++;
 #ifndef DISABLE_TRISTATE
-			if (pdata->mac_ver == EQOS_MAC_CORE_4_10) {
-				ret = pinctrl_pm_select_default_state(&pdata->pdev->dev);
-				if (ret < 0) {
-					dev_err(&pdata->pdev->dev,
-						"setting tx_tristate_disable state failed\n");
-				}
-				tx_tristate_disable = 1;
+			ret = pinctrl_pm_select_default_state(
+							&pdata->pdev->dev);
+			if (ret < 0) {
+				dev_err(&pdata->pdev->dev,
+					"disable txrx tristate failed\n");
 			}
+			tx_tristate_disable = 1;
 #endif
 			schedule_work(&pdata->iso_work);
 		}
@@ -379,12 +378,10 @@ static void eqos_adjust_link(struct net_device *dev)
 		pdata->oldduplex = -1;
 		pdata->xstats.link_disconnect_count++;
 #ifndef DISABLE_TRISTATE
-		if (pdata->mac_ver == EQOS_MAC_CORE_4_10) {
-			ret = pinctrl_pm_select_idle_state(&pdata->pdev->dev);
-			if (ret < 0) {
-				dev_err(&pdata->pdev->dev,
-					"setting tx_tristate_enable state failed\n");
-			}
+		ret = pinctrl_pm_select_idle_state(&pdata->pdev->dev);
+		if (ret < 0) {
+			dev_err(&pdata->pdev->dev,
+				"enable txrx tristate failed\n");
 		}
 #endif
 		schedule_work(&pdata->iso_work);
@@ -588,8 +585,10 @@ void eqos_mdio_unregister(struct net_device *dev)
 		pdata->phydev = NULL;
 	}
 
-	mdiobus_unregister(pdata->mii);
-	pdata->mii->priv = NULL;
+	if (pdata->mii) {
+		mdiobus_unregister(pdata->mii);
+		pdata->mii->priv = NULL;
+	}
 	pdata->mii = NULL;
 
 	DBGPR_MDIO("<--eqos_mdio_unregister\n");

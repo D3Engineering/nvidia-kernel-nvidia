@@ -1,7 +1,7 @@
 /*
  * hdmihdcp.c: hdmi hdcp functions.
  *
- * Copyright (c) 2014-2019, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2014-2021, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -128,6 +128,7 @@ static u8 g_fallback;
 static uint32_t hdcp_uuid[4] = HDCP_SERVICE_UUID;
 static uint32_t session_id;
 #endif
+static DEFINE_MUTEX(kfuse_lock);
 
 static struct tegra_dc *tegra_dc_hdmi_get_dc(struct tegra_hdmi *hdmi)
 {
@@ -553,6 +554,7 @@ static int get_nvhdcp_state(struct tegra_nvhdcp *nvhdcp,
 		pkt->hdcp22 = nvhdcp->hdcp22;
 		pkt->port = TEGRA_NVHDCP_PORT_HDMI;
 	}
+	pkt->sor = nvhdcp->hdmi->sor->ctrl_num;
 	mutex_unlock(&nvhdcp->lock);
 	return 0;
 }
@@ -740,11 +742,12 @@ static int load_kfuse(struct tegra_hdmi *hdmi)
 	u32 tmp;
 	int retries;
 
+	mutex_lock(&kfuse_lock);
 	/* copy load kfuse into buffer - only needed for early Tegra parts */
 	e = tegra_kfuse_read(buf, sizeof(buf));
 	if (e) {
 		nvhdcp_err("Kfuse read failure\n");
-		return e;
+		goto err;
 	}
 
 	/* write the kfuse to HDMI SRAM */
@@ -759,7 +762,8 @@ static int load_kfuse(struct tegra_hdmi *hdmi)
 	e = wait_key_ctrl(hdmi, PKEY_LOADED, PKEY_LOADED);
 	if (e) {
 		nvhdcp_err("key reload timeout\n");
-		return -EIO;
+		e = -EIO;
+		goto err;
 	}
 
 	tegra_sor_writel_ext(hdmi->sor, NV_SOR_KEY_SKEY_INDEX, 0);
@@ -775,7 +779,8 @@ static int load_kfuse(struct tegra_hdmi *hdmi)
 	} while (--retries);
 	if (!retries) {
 		nvhdcp_err("key SRAM clear timeout\n");
-		return -EIO;
+		e = -EIO;
+		goto err;
 	}
 
 	for (i = 0; i < KFUSE_DATA_SZ / 4; i += 4) {
@@ -803,11 +808,17 @@ static int load_kfuse(struct tegra_hdmi *hdmi)
 		e = wait_key_ctrl(hdmi, 0x10, 0); /* WRITE16 */
 		if (e) {
 			nvhdcp_err("key write timeout\n");
-			return -EIO;
+			e = -EIO;
+			goto err;
 		}
 	}
 
+	mutex_unlock(&kfuse_lock);
 	return 0;
+
+err:
+	mutex_unlock(&kfuse_lock);
+	return e;
 }
 
 /* validate srm signature for hdcp 2.2 */
@@ -836,7 +847,6 @@ static int get_srm_signature(struct hdcp_context_t *hdcp_context,
 #else
 	err = te_launch_trusted_oper(pkt, PKT_SIZE, HDCP_CMD_GEN_CMAC, ta_ctx);
 #endif
-
 	if (err)
 		nvhdcp_err("te launch operation failed with error %d\n", err);
 	return err;
@@ -911,13 +921,11 @@ static int verify_vprime(struct tegra_nvhdcp *nvhdcp, u8 repeater)
 	if (!pkt || !hdcp_context)
 		goto exit;
 
-	if (tegra_dc_is_nvdisplay()) {
-		e = get_srm_signature(hdcp_context, nonce, pkt, nvhdcp->ta_ctx,
-					HDCP_1x);
-		if (e) {
-			nvhdcp_err("Error getting srm signature!\n");
-			goto exit;
-		}
+	e = get_srm_signature(hdcp_context, nonce, pkt, nvhdcp->ta_ctx,
+				HDCP_1x);
+	if (e) {
+		nvhdcp_err("Error getting srm signature!\n");
+		goto exit;
 	}
 
 	memset(&verify_vprime_param, 0x0,
@@ -946,6 +954,16 @@ exit:
 	tsec_hdcp_free_context(hdcp_context);
 	kfree(pkt);
 	return e;
+}
+
+static void reset_repeater_info(struct tegra_nvhdcp *nvhdcp)
+{
+	nvhdcp_vdbg("reset repeater info\n");
+
+	memset(nvhdcp->v_prime, 0, sizeof(nvhdcp->v_prime));
+	nvhdcp->b_status = 0;
+	nvhdcp->num_bksv_list = 0;
+	memset(nvhdcp->bksv_list, 0, sizeof(nvhdcp->bksv_list));
 }
 
 static int get_repeater_info(struct tegra_nvhdcp *nvhdcp)
@@ -1016,6 +1034,51 @@ static int get_repeater_info(struct tegra_nvhdcp *nvhdcp)
 	}
 
 	return 0;
+}
+
+static int nvhdcp_te_open(struct tegra_nvhdcp *nvhdcp)
+{
+	int err = 0;
+
+#ifdef CONFIG_TRUSTED_LITTLE_KERNEL
+	/* differentiate between TLK and trusty */
+	if (te_is_secos_dev_enabled()) {
+		err = te_open_trusted_session_tlk(hdcp_uuid, sizeof(hdcp_uuid),
+					&session_id);
+	} else {
+		nvhdcp->ta_ctx = NULL;
+		/* Open a trusted sesion with HDCP TA */
+		err = te_open_trusted_session(HDCP_PORT_NAME, &nvhdcp->ta_ctx);
+	}
+#else
+	nvhdcp->ta_ctx = NULL;
+	/* Open a trusted sesion with HDCP TA */
+	err = te_open_trusted_session(HDCP_PORT_NAME, &nvhdcp->ta_ctx);
+#endif
+	return err;
+}
+
+static void nvhdcp_te_close(struct tegra_nvhdcp *nvhdcp)
+{
+#ifdef CONFIG_TRUSTED_LITTLE_KERNEL
+	if (te_is_secos_dev_enabled()) {
+		if (session_id) {
+			te_close_trusted_session_tlk(session_id, hdcp_uuid,
+			sizeof(hdcp_uuid));
+			session_id = 0;
+		}
+	} else {
+		if (nvhdcp->ta_ctx) {
+			te_close_trusted_session(nvhdcp->ta_ctx);
+			nvhdcp->ta_ctx = NULL;
+		}
+	}
+#else
+	if (nvhdcp->ta_ctx) {
+		te_close_trusted_session(nvhdcp->ta_ctx);
+		nvhdcp->ta_ctx = NULL;
+	}
+#endif
 }
 
 static int nvhdcp_ake_init_send(struct tegra_nvhdcp *nvhdcp, u8 *buf)
@@ -1267,22 +1330,7 @@ static int tsec_hdcp_authentication(struct tegra_nvhdcp *nvhdcp,
 	if (err)
 		goto exit;
 
-#ifdef CONFIG_TRUSTED_LITTLE_KERNEL
-	/* differentiate between TLK and trusty */
-	if (te_is_secos_dev_enabled()) {
-		err = te_open_trusted_session_tlk(hdcp_uuid, sizeof(hdcp_uuid),
-					&session_id);
-	} else {
-		nvhdcp->ta_ctx = NULL;
-		/* Open a trusted sesion with HDCP TA */
-		err = te_open_trusted_session(HDCP_PORT_NAME, &nvhdcp->ta_ctx);
-	}
-#else
-	nvhdcp->ta_ctx = NULL;
-	/* Open a trusted sesion with HDCP TA */
-	err = te_open_trusted_session(HDCP_PORT_NAME, &nvhdcp->ta_ctx);
-#endif
-
+	err = nvhdcp_te_open(nvhdcp);
 	if (err) {
 		nvhdcp_err("Error opening trusted session\n");
 		goto exit;
@@ -1457,27 +1505,7 @@ exit:
 	if (err)
 		nvhdcp_err("HDCP authentication failed with err %d\n", err);
 	kfree(pkt);
-
-#ifdef CONFIG_TRUSTED_LITTLE_KERNEL
-	if (te_is_secos_dev_enabled()) {
-		if (session_id) {
-			te_close_trusted_session_tlk(session_id, hdcp_uuid,
-			sizeof(hdcp_uuid));
-			session_id = 0;
-		}
-	} else {
-		if (nvhdcp->ta_ctx) {
-			te_close_trusted_session(nvhdcp->ta_ctx);
-			nvhdcp->ta_ctx = NULL;
-		}
-	}
-#else
-	if (nvhdcp->ta_ctx) {
-		te_close_trusted_session(nvhdcp->ta_ctx);
-		nvhdcp->ta_ctx = NULL;
-	}
-#endif
-
+	nvhdcp_te_close(nvhdcp);
 	return err;
 }
 
@@ -1515,7 +1543,7 @@ static void nvhdcp_fallback_worker(struct work_struct *work)
 	}
 }
 
-static void nvhdcp_downstream_worker(struct work_struct *work)
+static void nvhdcp1_downstream_worker(struct work_struct *work)
 {
 	struct tegra_nvhdcp *nvhdcp =
 		container_of(to_delayed_work(work), struct tegra_nvhdcp, work);
@@ -1574,14 +1602,10 @@ static void nvhdcp_downstream_worker(struct work_struct *work)
 
 	nvhdcp_vdbg("read Bcaps = 0x%02x\n", b_caps);
 
-	if (tegra_dc_is_nvdisplay()) {
-		nvhdcp->ta_ctx = NULL;
-		e = te_open_trusted_session(HDCP_PORT_NAME, &nvhdcp->ta_ctx);
-		if (e) {
-			nvhdcp_err("Error opening trusted session\n");
-			goto failure;
-		}
+	nvhdcp->ta_ctx = NULL;
+	e = nvhdcp_te_open(nvhdcp);
 
+	if (tegra_dc_is_nvdisplay()) {
 		/* if session successfully opened, launch operations
 		 * repeater flag in Bskv must be configured before loading fuses
 		 */
@@ -1825,19 +1849,21 @@ static void nvhdcp_downstream_worker(struct work_struct *work)
 			mutex_lock(&nvhdcp->lock);
 			goto failure;
 		}
+	} else {
+	    /* if not repeater reset repeater info, so it does not linger when a receiver
+	     * is connected */
+	    reset_repeater_info(nvhdcp);
 	}
-	/* T210/T210B01 vprime verification is handled in the upstream lib */
-	if (tegra_dc_is_nvdisplay()) {
-		/* perform vprime verification for repeater or SRM
-		 * revocation check for receiver
-		 */
-		e = verify_vprime(nvhdcp, b_caps & BCAPS_REPEATER);
-		if (e) {
-			nvhdcp_err("get vprime params failed\n");
-			goto failure;
-		} else
-			nvhdcp_vdbg("vprime verification passed\n");
-	}
+
+	/* perform vprime verification for repeater or SRM
+	 * revocation check for receiver
+	 */
+	e = verify_vprime(nvhdcp, b_caps & BCAPS_REPEATER);
+	if (e) {
+		nvhdcp_err("get vprime params failed\n");
+		goto failure;
+	} else
+		nvhdcp_vdbg("vprime verification passed\n");
 
 	mutex_lock(&nvhdcp->lock);
 	nvhdcp->state = STATE_LINK_VERIFY;
@@ -1907,24 +1933,14 @@ lost_hdmi:
 	}
 err:
 	mutex_unlock(&nvhdcp->lock);
-	if (tegra_dc_is_nvdisplay()) {
-		kfree(pkt);
-		if (nvhdcp->ta_ctx) {
-			te_close_trusted_session(nvhdcp->ta_ctx);
-			nvhdcp->ta_ctx = NULL;
-		}
-	}
+	kfree(pkt);
+	nvhdcp_te_close(nvhdcp);
 	tegra_dc_io_end(dc);
 	return;
 disable:
 	nvhdcp->state = STATE_OFF;
-	if (tegra_dc_is_nvdisplay()) {
-		kfree(pkt);
-		if (nvhdcp->ta_ctx) {
-			te_close_trusted_session(nvhdcp->ta_ctx);
-			nvhdcp->ta_ctx = NULL;
-		}
-	}
+	kfree(pkt);
+	nvhdcp_te_close(nvhdcp);
 	nvhdcp_set_plugged(nvhdcp, false);
 	mutex_unlock(&nvhdcp->lock);
 	tegra_dc_io_end(dc);
@@ -1937,9 +1953,7 @@ static int link_integrity_check(struct tegra_nvhdcp *nvhdcp,
 	u16 rx_status = 0;
 	uint64_t *pkt = NULL;
 	int err = 0;
-#ifdef CONFIG_TRUSTED_LITTLE_KERNEL
 	unsigned char nonce[HDCP_NONCE_SIZE];
-#endif
 
 	pkt = kzalloc(PKT_SIZE, GFP_KERNEL);
 
@@ -1971,19 +1985,7 @@ static int link_integrity_check(struct tegra_nvhdcp *nvhdcp,
 							msecs_to_jiffies(10));
 			goto exit;
 		}
-/* If CONFIG_TUSTED_LITTLE_KERNEL flag is disabled, TSEC wil be sent a garbage SRM signature
- * resulting in HDCP authentication failure
- */
-#ifdef CONFIG_TRUSTED_LITTLE_KERNEL
-		/* differentiate between TLK and trusty */
-		if (te_is_secos_dev_enabled()) {
-			err = te_open_trusted_session_tlk(hdcp_uuid, sizeof(hdcp_uuid),
-					&session_id);
-		} else {
-			nvhdcp->ta_ctx = NULL;
-			/* Open a trusted sesion with HDCP TA */
-			err = te_open_trusted_session(HDCP_PORT_NAME, &nvhdcp->ta_ctx);
-		}
+		err = nvhdcp_te_open(nvhdcp);
 		if (err) {
 			nvhdcp_err("Error opening trusted session\n");
 			goto exit;
@@ -1994,7 +1996,6 @@ static int link_integrity_check(struct tegra_nvhdcp *nvhdcp,
 			nvhdcp_err("Error getting srm signature!\n");
 			goto exit;
 		}
-#endif
 		err =  tsec_hdcp_verify_vprime(hdcp_context,
 				(char *)(pkt + HDCP_CMAC_OFFSET),
 				*((unsigned int *)(pkt + HDCP_TSEC_ADDR_OFFSET)),
@@ -2010,10 +2011,7 @@ static int link_integrity_check(struct tegra_nvhdcp *nvhdcp,
 		err = (rx_status & HDCP_RX_STATUS_MSG_REAUTH_REQ);
 exit:
 	kfree(pkt);
-	if (nvhdcp->ta_ctx) {
-		te_close_trusted_session(nvhdcp->ta_ctx);
-		nvhdcp->ta_ctx = NULL;
-	}
+	nvhdcp_te_close(nvhdcp);
 	return err;
 }
 
@@ -2152,55 +2150,51 @@ err:
 	return;
 }
 
-static int tegra_nvhdcp_on(struct tegra_nvhdcp *nvhdcp)
+static void nvhdcp_downstream_worker(struct work_struct *work)
 {
+	struct tegra_nvhdcp *nvhdcp =
+		container_of(to_delayed_work(work), struct tegra_nvhdcp, work);
+
 	u8 hdcp2version = 0;
 	int e;
 	int val;
+
+	nvhdcp->fail_count = 0;
+	e = nvhdcp_i2c_read8(nvhdcp, HDCP_HDCP2_VERSION, &hdcp2version);
+	if (e)
+		nvhdcp_err("nvhdcp i2c HDCP22 version read failed\n");
+	/* Do not stop nauthentication if i2c version reads fail as  */
+	/* HDCP 1.x test 1A-04 expects reading HDCP regs */
+	if ((hdcp2version & HDCP_HDCP2_VERSION_HDCP22_YES) && !g_fallback) {
+		val = HDCP_EESS_ENABLE<<31|
+			HDCP22_EESS_START<<16|
+			HDCP22_EESS_END;
+		tegra_sor_writel_ext(nvhdcp->hdmi->sor,
+			HDMI_VSYNC_WINDOW, val);
+		nvhdcp->hdcp22 = HDCP22_PROTOCOL;
+		nvhdcp2_downstream_worker(work);
+	} else {
+		val = HDCP_EESS_ENABLE<<31|
+			HDCP1X_EESS_START<<16|
+			HDCP1X_EESS_END;
+		tegra_sor_writel_ext(nvhdcp->hdmi->sor, HDMI_VSYNC_WINDOW,
+					val);
+		nvhdcp->hdcp22 = HDCP1X_PROTOCOL;
+		nvhdcp1_downstream_worker(work);
+	}
+}
+
+static int tegra_nvhdcp_on(struct tegra_nvhdcp *nvhdcp)
+{
 	int delay = tegra_edid_get_quirks(nvhdcp->hdmi->edid) &
 			TEGRA_EDID_QUIRK_DELAY_HDCP ? 5000 : 100;
+
 	nvhdcp->state = STATE_UNAUTHENTICATED;
 	if (nvhdcp_is_plugged(nvhdcp) &&
 		atomic_read(&nvhdcp->policy) !=
 		TEGRA_DC_HDCP_POLICY_ALWAYS_OFF &&
 		!(tegra_edid_get_quirks(nvhdcp->hdmi->edid) &
 		  TEGRA_EDID_QUIRK_NO_HDCP)) {
-		nvhdcp->fail_count = 0;
-		e = nvhdcp_i2c_read8(nvhdcp, HDCP_HDCP2_VERSION, &hdcp2version);
-		if (e)
-			nvhdcp_err("nvhdcp i2c HDCP22 version read failed\n");
-		/* Do not stop nauthentication if i2c version reads fail as  */
-		/* HDCP 1.x test 1A-04 expects reading HDCP regs */
-		if (hdcp2version & HDCP_HDCP2_VERSION_HDCP22_YES) {
-			if (g_fallback) {
-				val = HDCP_EESS_ENABLE<<31|
-					HDCP1X_EESS_START<<16|
-					HDCP1X_EESS_END;
-				tegra_sor_writel_ext(nvhdcp->hdmi->sor,
-					HDMI_VSYNC_WINDOW, val);
-				INIT_DELAYED_WORK(&nvhdcp->work,
-				nvhdcp_downstream_worker);
-				nvhdcp->hdcp22 = HDCP1X_PROTOCOL;
-			} else {
-				val = HDCP_EESS_ENABLE<<31|
-					HDCP22_EESS_START<<16|
-					HDCP22_EESS_END;
-				tegra_sor_writel_ext(nvhdcp->hdmi->sor,
-					HDMI_VSYNC_WINDOW, val);
-				INIT_DELAYED_WORK(&nvhdcp->work,
-					nvhdcp2_downstream_worker);
-				nvhdcp->hdcp22 = HDCP22_PROTOCOL;
-			}
-		} else {
-			val = HDCP_EESS_ENABLE<<31|
-				HDCP1X_EESS_START<<16|
-				HDCP1X_EESS_END;
-			tegra_sor_writel_ext(nvhdcp->hdmi->sor, HDMI_VSYNC_WINDOW,
-						val);
-			INIT_DELAYED_WORK(&nvhdcp->work,
-				nvhdcp_downstream_worker);
-			nvhdcp->hdcp22 = HDCP1X_PROTOCOL;
-		}
 		queue_delayed_work(nvhdcp->downstream_wq, &nvhdcp->work,
 				msecs_to_jiffies(delay));
 	}
@@ -2317,16 +2311,23 @@ static long nvhdcp_dev_ioctl(struct file *filp,
 {
 	struct tegra_nvhdcp *nvhdcp = filp->private_data;
 	struct tegra_nvhdcp_packet *pkt;
+	struct tegra_hdmi *hdmi = nvhdcp->hdmi;
 	int e = -ENOTTY;
 
 	switch (cmd) {
 	case TEGRAIO_NVHDCP_ON:
+		mutex_lock(&nvhdcp->lock);
+		nvhdcp_set_plugged(nvhdcp, hdmi->enabled);
+		mutex_unlock(&nvhdcp->lock);
 		return tegra_nvhdcp_on(nvhdcp);
 
 	case TEGRAIO_NVHDCP_OFF:
 		return tegra_nvhdcp_off(nvhdcp);
 
 	case TEGRAIO_NVHDCP_SET_POLICY:
+		mutex_lock(&nvhdcp->lock);
+		nvhdcp_set_plugged(nvhdcp, hdmi->enabled);
+		mutex_unlock(&nvhdcp->lock);
 		return tegra_nvhdcp_set_policy(nvhdcp, arg);
 
 	case TEGRAIO_NVHDCP_READ_M:
@@ -2362,6 +2363,9 @@ static long nvhdcp_dev_ioctl(struct file *filp,
 		return e;
 
 	case TEGRAIO_NVHDCP_RENEGOTIATE:
+		mutex_lock(&nvhdcp->lock);
+		nvhdcp_set_plugged(nvhdcp, hdmi->enabled);
+		mutex_unlock(&nvhdcp->lock);
 		e = tegra_nvhdcp_renegotiate(nvhdcp);
 		break;
 
@@ -2380,10 +2384,13 @@ static long nvhdcp_dev_ioctl(struct file *filp,
 	case TEGRAIO_NVHDCP_RECV_CAPABLE:
 		{
 			__u32 recv_capable = tegra_nvhdcp_recv_capable(nvhdcp);
+			e = 0;
+			pkt = NULL;
 			if (copy_to_user((void __user *)arg, &recv_capable,
-				sizeof(recv_capable)))
-				return -EFAULT;
-			return 0;
+				sizeof(recv_capable))) {
+				e = -EFAULT;
+			}
+			return e;
 		}
 	}
 
@@ -2398,7 +2405,22 @@ static int nvhdcp_dev_open(struct inode *inode, struct file *filp)
 	struct miscdevice *miscdev = filp->private_data;
 	struct tegra_nvhdcp *nvhdcp =
 		container_of(miscdev, struct tegra_nvhdcp, miscdev);
+#ifndef CONFIG_ANDROID
+	int err = 0;
+#endif
 	filp->private_data = nvhdcp;
+
+/* enable policy only if HDCP TA is ready */
+#ifndef CONFIG_ANDROID
+	if (!nvhdcp->policy_initialized) {
+		nvhdcp->policy_initialized = true;
+		err = nvhdcp_te_open(nvhdcp);
+		if (!err)
+			tegra_nvhdcp_set_policy(nvhdcp,
+				TEGRA_DC_HDCP_POLICY_ALWAYS_ON);
+		nvhdcp_te_close(nvhdcp);
+	}
+#endif
 	return 0;
 }
 
@@ -2487,6 +2509,7 @@ struct tegra_nvhdcp *tegra_nvhdcp_create(struct tegra_hdmi *hdmi,
 	nvhdcp->downstream_wq = create_singlethread_workqueue(nvhdcp->name);
 	nvhdcp->fallback_wq = create_singlethread_workqueue(nvhdcp->name);
 
+	INIT_DELAYED_WORK(&nvhdcp->work, nvhdcp_downstream_worker);
 	INIT_DELAYED_WORK(&nvhdcp->fallback_work, nvhdcp_fallback_worker);
 
 	nvhdcp->miscdev.minor = MISC_DYNAMIC_MINOR;

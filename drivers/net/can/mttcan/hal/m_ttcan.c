@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2018, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2015-2021, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -333,6 +333,8 @@ int ttcan_set_bitrate(struct ttcan_controller *ttcan)
 	}
 
 	if (ttcan->bt_config.fd_flags & CAN_FD_FLAG) {
+		ttcan->bt_config.data.tdc = ttcan->tdc;
+
 		dbtp_reg = ((ttcan->bt_config.data.phase_seg2 - 1) <<
 			    MTT_DBTP_DTSEG2_SHIFT) & MTT_DBTP_DTSEG2_MASK;
 		dbtp_reg |= ((ttcan->bt_config.data.phase_seg1 +
@@ -347,6 +349,8 @@ int ttcan_set_bitrate(struct ttcan_controller *ttcan)
 
 		tdcr_reg = (ttcan->bt_config.data.tdc_offset <<
 			MTT_TDCR_TDCO_SHIFT) & MTT_TDCR_TDCO_MASK;
+
+		tdcr_reg |= ttcan->tdc_offset;
 
 		pr_debug("%s DBTP(0x%x) value (0x%x)\n", __func__,
 			ADR_MTTCAN_DBTP, dbtp_reg);
@@ -562,7 +566,7 @@ int ttcan_tx_fifo_full(struct ttcan_controller *ttcan)
 
 static int process_rx_mesg(struct ttcan_controller *ttcan, u32 addr)
 {
-	struct ttcanfd_frame ttcanfd;
+	struct ttcanfd_frame ttcanfd = {0};
 	ttcan_read_rx_msg_ram(ttcan, addr, &ttcanfd);
 	return add_msg_controller_list(ttcan, &ttcanfd, &ttcan->rx_b, BUFFER);
 }
@@ -651,7 +655,7 @@ unsigned int ttcan_read_txevt_fifo(struct ttcan_controller *ttcan)
 unsigned int ttcan_read_rx_fifo0(struct ttcan_controller *ttcan)
 {
 	u32 rxf0s_reg;
-	struct ttcanfd_frame ttcanfd;
+	struct ttcanfd_frame ttcanfd = {0};
 	u32 read_addr;
 	int q_read = 0;
 	unsigned int msgs_read = 0;
@@ -698,7 +702,7 @@ unsigned int ttcan_read_rx_fifo0(struct ttcan_controller *ttcan)
 unsigned int ttcan_read_rx_fifo1(struct ttcan_controller *ttcan)
 {
 	u32 rxf1s_reg;
-	struct ttcanfd_frame ttcanfd;
+	struct ttcanfd_frame ttcanfd = {0};
 	u32 read_addr;
 	int q_read = 0;
 	int msgs_read = 0;
