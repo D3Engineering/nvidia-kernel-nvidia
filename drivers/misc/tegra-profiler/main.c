@@ -1,7 +1,7 @@
 /*
  * drivers/misc/tegra-profiler/main.c
  *
- * Copyright (c) 2013-2020, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2022, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -37,7 +37,7 @@
 #include "eh_unwind.h"
 #include "uncore_events.h"
 
-#ifdef CONFIG_ARCH_TEGRA_19x_SOC
+#if defined(CONFIG_ARCH_TEGRA_19x_SOC) || defined(CONFIG_ARCH_TEGRA_194_SOC)
 #include "carmel_pmu.h"
 #endif
 
@@ -185,8 +185,8 @@ validate_freq(unsigned int freq)
 static int
 set_parameters_for_cpu(struct quadd_pmu_setup_for_cpu *params)
 {
-	int i, err, nr_pmu = 0;
-	int cpuid = params->cpuid;
+	unsigned int i, nr_pmu = 0;
+	int err, cpuid = params->cpuid;
 
 	struct source_info *pmu_info = &per_cpu(ctx_pmu_info, cpuid);
 	struct quadd_event pmu_events[QUADD_MAX_COUNTERS];
@@ -275,7 +275,7 @@ set_parameters(struct quadd_parameters *p)
 	struct task_struct *task = NULL;
 	u64 *low_addr_p;
 	u32 extra, uncore_freq;
-#ifdef CONFIG_ARCH_TEGRA_19x_SOC
+#if defined(CONFIG_ARCH_TEGRA_19x_SOC) || defined(CONFIG_ARCH_TEGRA_194_SOC)
 	int nr;
 #endif
 
@@ -376,7 +376,7 @@ set_parameters(struct quadd_parameters *p)
 			goto out_put_task;
 	}
 
-#ifdef CONFIG_ARCH_TEGRA_19x_SOC
+#if defined(CONFIG_ARCH_TEGRA_19x_SOC) || defined(CONFIG_ARCH_TEGRA_194_SOC)
 	nr = p->nr_events;
 
 	if (nr > QUADD_MAX_COUNTERS) {
@@ -651,6 +651,7 @@ int quadd_late_init(void)
 	unsigned int raw_event_mask;
 	struct quadd_event *events;
 	struct source_info *pmu_info;
+	struct quadd_event_source *src;
 	int cpuid;
 
 	if (unlikely(!ctx.early_initialized))
@@ -659,41 +660,39 @@ int quadd_late_init(void)
 	if (likely(ctx.initialized))
 		return 0;
 
-	ctx.pmu = pmu_init();
-	if (IS_ERR(ctx.pmu)) {
-		pr_err("PMU init failed\n");
-		err = PTR_ERR(ctx.pmu);
-		goto out_err;
+	src = pmu_init();
+	ctx.pmu = IS_ERR(src) ? NULL : src;
+
+	if (ctx.pmu) {
+		for_each_possible_cpu(cpuid) {
+			const struct quadd_arch_info *arch;
+
+			arch = ctx.pmu->get_arch(cpuid);
+			if (!arch)
+				continue;
+
+			pmu_info = &per_cpu(ctx_pmu_info, cpuid);
+			pmu_info->is_present = 1;
+
+			events = pmu_info->supp_events;
+			nr_events =
+				ctx.pmu->supported_events(cpuid, events,
+							  QUADD_MAX_COUNTERS,
+							  &raw_event_mask);
+
+			pmu_info->nr_supp_events = nr_events;
+			pmu_info->raw_event_mask = raw_event_mask;
+
+			pr_debug("CPU: %d PMU: events: %d, raw mask: %#x\n",
+				 cpuid, nr_events, raw_event_mask);
+
+			for (i = 0; i < nr_events; i++)
+				pr_debug("CPU: %d PMU event: %s\n", cpuid,
+					 quadd_get_hw_event_str(events[i].id));
+		}
 	}
 
-	for_each_possible_cpu(cpuid) {
-		const struct quadd_arch_info *arch;
-
-		arch = ctx.pmu->get_arch(cpuid);
-		if (!arch)
-			continue;
-
-		pmu_info = &per_cpu(ctx_pmu_info, cpuid);
-		pmu_info->is_present = 1;
-
-		events = pmu_info->supp_events;
-		nr_events =
-		    ctx.pmu->supported_events(cpuid, events,
-					      QUADD_MAX_COUNTERS,
-					      &raw_event_mask);
-
-		pmu_info->nr_supp_events = nr_events;
-		pmu_info->raw_event_mask = raw_event_mask;
-
-		pr_debug("CPU: %d PMU: amount of events: %d, raw mask: %#x\n",
-			 cpuid, nr_events, raw_event_mask);
-
-		for (i = 0; i < nr_events; i++)
-			pr_debug("CPU: %d PMU event: %s\n", cpuid,
-				 quadd_get_hw_event_str(events[i].id));
-	}
-
-#ifdef CONFIG_ARCH_TEGRA_19x_SOC
+#if defined(CONFIG_ARCH_TEGRA_19x_SOC) || defined(CONFIG_ARCH_TEGRA_194_SOC)
 	ctx.carmel_pmu = quadd_carmel_uncore_pmu_init();
 	if (IS_ERR(ctx.carmel_pmu)) {
 		pr_err("Carmel Uncore PMU init failed\n");
@@ -757,13 +756,12 @@ out_err_uncore:
 out_err_hrt:
 	quadd_hrt_deinit();
 out_err_carmel_pmu:
-#ifdef CONFIG_ARCH_TEGRA_19x_SOC
+#if defined(CONFIG_ARCH_TEGRA_19x_SOC) || defined(CONFIG_ARCH_TEGRA_194_SOC)
 	quadd_carmel_uncore_pmu_deinit();
 out_err_pmu:
 #endif
 	pmu_deinit();
 
-out_err:
 	return err;
 }
 
@@ -828,7 +826,7 @@ static void deinit(void)
 		quadd_power_clk_deinit();
 		quadd_uncore_deinit();
 		quadd_hrt_deinit();
-#ifdef CONFIG_ARCH_TEGRA_19x_SOC
+#if defined(CONFIG_ARCH_TEGRA_19x_SOC) || defined(CONFIG_ARCH_TEGRA_194_SOC)
 		quadd_carmel_uncore_pmu_deinit();
 #endif
 		pmu_deinit();

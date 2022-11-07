@@ -1,7 +1,7 @@
 /*
  * Tegra CSI4 device common APIs
  *
- * Copyright (c) 2016-2019, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2016-2021, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author: Frank Chen <frankc@nvidia.com>
  *
@@ -124,7 +124,6 @@ static void csi4_phy_config(
 	unsigned int mipi_clk_mhz = 0;
 	/* Calculated clock settling times for cil and csi clocks */
 	unsigned int cil_settletime = read_settle_time_from_dt(chan);
-	unsigned int discontinuous_clk = read_discontinuous_clk_from_dt(chan);
 	unsigned int csi_settletime;
 	u32 phy_mode = read_phy_mode_from_dt(chan);
 
@@ -199,7 +198,7 @@ static void csi4_phy_config(
 	if (chan->pg_mode || !(chan->s_data))
 		mipi_clk_mhz = csi->clk_freq / 1000000;
 	else
-		mipi_clk_mhz = read_pixel_clk_from_dt(chan) / 1000000;
+		mipi_clk_mhz = read_mipi_clk_from_dt(chan) / 1000000;
 
 	dev_dbg(csi->dev, "cil core clock: %u, csi clock: %u", cil_clk_mhz,
 		mipi_clk_mhz);
@@ -230,7 +229,7 @@ static void csi4_phy_config(
 			NVCSI_CIL_A_CONTROL,
 			DEFAULT_DESKEW_COMPARE | DEFAULT_DESKEW_SETTLE |
 			csi_settletime << CLK_SETTLE_SHIFT |
-			!discontinuous_clk << T18X_BYPASS_LP_SEQ_SHIFT |
+			T18X_BYPASS_LP_SEQ |
 			cil_settletime << THS_SETTLE_SHIFT);
 		/* release soft reset */
 		csi4_phy_write(chan, phy_num, NVCSI_CIL_A_SW_RESET, 0x0);
@@ -316,7 +315,7 @@ static void csi4_phy_config(
 				DEFAULT_DESKEW_COMPARE |
 				DEFAULT_DESKEW_SETTLE |
 				csi_settletime << CLK_SETTLE_SHIFT |
-				!discontinuous_clk << T18X_BYPASS_LP_SEQ_SHIFT |
+				T18X_BYPASS_LP_SEQ |
 				cil_settletime << THS_SETTLE_SHIFT);
 			/* release soft reset */
 			csi4_phy_write(chan, phy_num,
@@ -336,7 +335,7 @@ static void csi4_phy_config(
 			NVCSI_CIL_B_CONTROL,
 			DEFAULT_DESKEW_COMPARE | DEFAULT_DESKEW_SETTLE |
 			csi_settletime << CLK_SETTLE_SHIFT |
-			!discontinuous_clk << T18X_BYPASS_LP_SEQ_SHIFT |
+			T18X_BYPASS_LP_SEQ |
 			cil_settletime << THS_SETTLE_SHIFT);
 		/* release soft reset */
 		csi4_phy_write(chan, phy_num, NVCSI_CIL_B_SW_RESET, 0x0);
@@ -353,38 +352,38 @@ static void csi4_stream_check_status(struct tegra_csi_channel *chan,
 	if (!chan->pg_mode) {
 		status = csi4_stream_read(chan, port_idx, ERROR_STATUS2VI_VC0);
 		if (status)
-			dev_err(csi->dev,
+			dev_info(csi->dev,
 				"%s (%d) ERROR_STATUS2VI_VC0 = 0x%08x\n",
 				__func__, port_idx, status);
 
 		status = csi4_stream_read(chan, port_idx, ERROR_STATUS2VI_VC1);
 		if (status)
-			dev_err(csi->dev,
+			dev_info(csi->dev,
 				"%s (%d) ERROR_STATUS2VI_VC1 = 0x%08x\n",
 				__func__, port_idx, status);
 
 		status = csi4_stream_read(chan, port_idx, ERROR_STATUS2VI_VC2);
 		if (status)
-			dev_err(csi->dev,
+			dev_info(csi->dev,
 				"%s (%d) ERROR_STATUS2VI_VC2 = 0x%08x\n",
 				__func__, port_idx, status);
 
 		status = csi4_stream_read(chan, port_idx, ERROR_STATUS2VI_VC3);
 		if (status)
-			dev_err(csi->dev,
+			dev_info(csi->dev,
 				"%s (%d) ERROR_STATUS2VI_VC2 = 0x%08x\n",
 				__func__, port_idx, status);
 	}
 
 	status = csi4_stream_read(chan, port_idx, INTR_STATUS);
 	if (status)
-		dev_err(csi->dev,
+		dev_info(csi->dev,
 				"%s (%d) INTR_STATUS 0x%08x\n",
 				__func__, port_idx, status);
 
 	status = csi4_stream_read(chan, port_idx, ERR_INTR_STATUS);
 	if (status)
-		dev_err(csi->dev,
+		dev_info(csi->dev,
 				"%s (%d) ERR_INTR_STATUS 0x%08x\n",
 				__func__, port_idx, status);
 }
@@ -398,13 +397,13 @@ static void csi4_cil_check_status(struct tegra_csi_channel *chan, int port_idx)
 
 	status = csi4_stream_read(chan, port_idx, CILA_INTR_STATUS);
 	if (status)
-		dev_err(csi->dev,
+		dev_info(csi->dev,
 			"%s (%d) CILA_INTR_STATUS 0x%08x\n",
 			__func__, port_idx, status);
 
 	status = csi4_stream_read(chan, port_idx, CILA_ERR_INTR_STATUS);
 	if (status)
-		dev_err(csi->dev,
+		dev_info(csi->dev,
 			"%s (%d) CILA_ERR_INTR_STATUS 0x%08x\n",
 			__func__, port_idx, status);
 }

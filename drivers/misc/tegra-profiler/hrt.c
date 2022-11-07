@@ -1,7 +1,7 @@
 /*
  * drivers/misc/tegra-profiler/hrt.c
  *
- * Copyright (c) 2015-2020, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015-2022, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -251,10 +251,8 @@ static void put_header(int cpuid, bool is_uncore)
 			hdr->flags |= QUADD_HDR_FLAG_BT_DWARF;
 	}
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0))
 	if (hrt.use_arch_timer)
 		hdr->flags |= QUADD_HDR_FLAG_USE_ARCH_TIMER;
-#endif
 
 	if (hrt.get_stack_offset)
 		hdr->flags |= QUADD_HDR_FLAG_STACK_OFFSET;
@@ -449,8 +447,9 @@ read_all_sources(struct pt_regs *regs, struct task_struct *task, u64 ts)
 	u32 vpid, vtgid;
 	u32 state, extra_data = 0, urcs = 0, ts_delta;
 	u64 ts_start, ts_end;
-	int i, vec_idx = 0, bt_size = 0;
+	int i, bt_size = 0;
 	int nr_events = 0, nr_positive_events = 0;
+	unsigned int vec_idx = 0;
 	struct pt_regs *user_regs;
 	struct quadd_iovec vec[9];
 	struct quadd_event_data events[QUADD_MAX_COUNTERS];
@@ -621,8 +620,15 @@ static void start_hrtimer(struct quadd_cpu_context *cpu_ctx)
 {
 	u32 period = prandom_u32_max(hrt.sample_period);
 
+#if ((defined(CONFIG_PREEMPT_RT) || defined(CONFIG_PREEMPT_RT_FULL)) && \
+		(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)))
+	hrtimer_start(&cpu_ctx->hrtimer, ns_to_ktime(period),
+		      HRTIMER_MODE_REL_PINNED_HARD);
+#else
 	hrtimer_start(&cpu_ctx->hrtimer, ns_to_ktime(period),
 		      HRTIMER_MODE_REL_PINNED);
+#endif
+
 	qm_debug_timer_start(NULL, period);
 }
 
@@ -634,7 +640,7 @@ static void cancel_hrtimer(struct quadd_cpu_context *cpu_ctx)
 
 static void init_hrtimer(struct quadd_cpu_context *cpu_ctx)
 {
-#if (defined(CONFIG_PREEMPT_RT_FULL) && \
+#if ((defined(CONFIG_PREEMPT_RT) || defined(CONFIG_PREEMPT_RT_FULL)) && \
 		(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)))
 	hrtimer_init(&cpu_ctx->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
 #else
@@ -1016,7 +1022,7 @@ int quadd_hrt_start(void)
 		(extra & QUADD_PARAM_EXTRA_STACK_OFFSET) ? 1 : 0;
 
 	for_each_possible_cpu(cpuid) {
-		if (ctx->pmu->get_arch(cpuid))
+		if (ctx->pmu && ctx->pmu->get_arch(cpuid))
 			put_header(cpuid, false);
 	}
 	put_header(0, true);
@@ -1072,18 +1078,12 @@ void quadd_hrt_get_state(struct quadd_module_state *state)
 
 static void init_arch_timer(void)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 	struct arch_timer_kvm_info *info;
-#endif
 
 	u32 cntkctl = arch_timer_get_cntkctl();
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 	info = arch_timer_get_kvm_info();
 	hrt.tc = &info->timecounter;
-#else
-	hrt.tc = arch_timer_get_timecounter();
-#endif
 
 	hrt.arch_timer_user_access =
 		(cntkctl & ARCH_TIMER_USR_VCT_ACCESS_EN) ? 1 : 0;

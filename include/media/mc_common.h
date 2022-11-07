@@ -3,7 +3,7 @@
  *
  * Tegra Media controller common APIs
  *
- * Copyright (c) 2012-2021, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2012-2022, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -34,6 +34,7 @@
 #include <linux/workqueue.h>
 #include <linux/semaphore.h>
 #include <linux/rwsem.h>
+#include <linux/version.h>
 
 #define MAX_FORMAT_NUM	64
 #define	MAX_SUBDEVICES	4
@@ -263,6 +264,10 @@ struct tegra_channel {
 
 	atomic_t syncpt_depth;
 	struct rw_semaphore reset_lock;
+
+	dma_addr_t emb_buf;
+	void *emb_buf_addr;
+	unsigned int emb_buf_size;
 };
 
 #define to_tegra_channel(vdev) \
@@ -323,10 +328,6 @@ struct tegra_mc_vi {
 	bool bypass;
 
 	const struct tegra_vi_fops *fops;
-
-	dma_addr_t emb_buf;
-	void *emb_buf_addr;
-	unsigned int emb_buf_size;
 };
 
 int tegra_vi_get_port_info(struct tegra_channel *chan,
@@ -349,11 +350,13 @@ int tegra_vi2_power_on(struct tegra_mc_vi *vi);
 void tegra_vi2_power_off(struct tegra_mc_vi *vi);
 int tegra_vi4_power_on(struct tegra_mc_vi *vi);
 void tegra_vi4_power_off(struct tegra_mc_vi *vi);
-int tegra_vi5_power_on(struct tegra_mc_vi *vi);
-void tegra_vi5_power_off(struct tegra_mc_vi *vi);
+int tegra_vi5_enable(struct tegra_mc_vi *vi);
+void tegra_vi5_disable(struct tegra_mc_vi *vi);
 int tegra_clean_unlinked_channels(struct tegra_mc_vi *vi);
 int tegra_channel_s_ctrl(struct v4l2_ctrl *ctrl);
 int tegra_vi_media_controller_init(struct tegra_mc_vi *mc_vi,
+			struct platform_device *pdev);
+int tegra_capture_vi_media_controller_init(struct tegra_mc_vi *mc_vi,
 			struct platform_device *pdev);
 void tegra_vi_media_controller_cleanup(struct tegra_mc_vi *mc_vi);
 void tegra_channel_ec_close(struct tegra_mc_vi *mc_vi);
@@ -369,7 +372,7 @@ u32 tegra_core_get_fourcc_by_idx(struct tegra_channel *chan,
 int tegra_core_get_idx_by_code(struct tegra_channel *chan,
 		unsigned int code, unsigned offset);
 int tegra_core_get_code_by_fourcc(struct tegra_channel *chan,
-		unsigned int fourcc, unsigned int offset);
+		unsigned int fourcc, unsigned offset);
 const struct tegra_video_format *tegra_core_get_format_by_code(
 		struct tegra_channel *chan,
 		unsigned int code, unsigned offset);
@@ -381,7 +384,11 @@ int tegra_channel_set_stream(struct tegra_channel *chan, bool on);
 int tegra_channel_write_blobs(struct tegra_channel *chan);
 void tegra_channel_ring_buffer(struct tegra_channel *chan,
 			       struct vb2_v4l2_buffer *vb,
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 			       struct timespec *ts, int state);
+#else
+			       struct timespec64 *ts, int state);
+#endif
 struct tegra_channel_buffer *dequeue_buffer(struct tegra_channel *chan,
 	bool requeue);
 struct tegra_channel_buffer *dequeue_dequeue_buffer(struct tegra_channel *chan);
@@ -394,7 +401,11 @@ void free_ring_buffers(struct tegra_channel *chan, int frames);
 void release_buffer(struct tegra_channel *chan,
 			struct tegra_channel_buffer *buf);
 void set_timestamp(struct tegra_channel_buffer *buf,
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 			const struct timespec *ts);
+#else
+			const struct timespec64 *ts);
+#endif
 void enqueue_inflight(struct tegra_channel *chan,
 			struct tegra_channel_buffer *buf);
 struct tegra_channel_buffer *dequeue_inflight(struct tegra_channel *chan);
@@ -417,6 +428,8 @@ struct tegra_vi_fops {
 			bool use_prio, unsigned int cmd, void *arg);
 	int (*vi_mfi_work)(struct tegra_mc_vi *vi, int port);
 	void (*vi_stride_align)(unsigned int *bpl);
+	void (*vi_unit_get_device_handle)(struct platform_device *pdev,
+		uint32_t csi_steam_id, struct device **dev);
 };
 
 struct tegra_csi_fops {
@@ -431,6 +444,7 @@ struct tegra_csi_fops {
 	int (*csi_error_recover)(struct tegra_csi_channel *chan, int port_idx);
 	int (*mipical)(struct tegra_csi_channel *chan);
 	int (*hw_init)(struct tegra_csi_device *csi);
+	int (*tpg_set_gain)(struct tegra_csi_channel *chan, int gain_ratio_tpg);
 };
 
 struct tegra_t210_vi_data {

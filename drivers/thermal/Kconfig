@@ -1,5 +1,4 @@
-
-# Copyright (c) 2012-2019, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2012-2021, NVIDIA CORPORATION.  All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -12,6 +11,8 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+menu "Nvidia Thermal Drivers"
 
 config PWM_FAN
 	tristate "Tegra PWM Fan driver"
@@ -49,3 +50,4 @@ config USERSPACE_THERM_ALERT
 
 	  Say 'Y' here if you want to get notification of temperature alert
 	  in user space.
+endmenu

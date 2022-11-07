@@ -1,7 +1,7 @@
 /*
  * Tegra Video Input 4 device common APIs
  *
- * Copyright (c) 2016-2020, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2016-2021, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author: Frank Chen <frank@nvidia.com>
  *
@@ -12,8 +12,8 @@
 #include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/nvhost.h>
-#include <linux/tegra-powergate.h>
-#include <media/capture.h>
+#include <linux/version.h>
+#include <media/fusa-capture/capture-vi.h>
 #include <media/tegra_camera_platform.h>
 #include <media/mc_common.h>
 #include <media/vi4_registers.h>
@@ -25,6 +25,7 @@
 #include "vi4_fops.h"
 #include <media/sensor_common.h>
 #include <trace/events/camera_common.h>
+
 #define BPP_MEM		2
 #define MAX_VI_CHANNEL 12
 #define NUM_FIELDS_INTERLACED 2
@@ -175,7 +176,11 @@ static bool vi4_check_status(struct tegra_channel *chan)
 
 static bool vi_notify_wait(struct tegra_channel *chan,
 		struct tegra_channel_buffer *buf,
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 		struct timespec *ts)
+#else
+		struct timespec64 *ts)
+#endif
 {
 	int i, err;
 	u32 thresh[TEGRA_CSI_BLOCKS];
@@ -228,7 +233,11 @@ static bool vi_notify_wait(struct tegra_channel *chan,
 				dev_err(chan->vi->dev,
 					"no capture status! err = %d\n", err);
 			else {
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 				*ts = ns_to_timespec((s64)status.sof_ts);
+#else
+				*ts = ns_to_timespec64((s64)status.sof_ts);
+#endif
 
 				dev_dbg(&chan->video->dev,
 					"%s: vi4 got SOF syncpt buf[%p]\n",
@@ -244,44 +253,35 @@ static void tegra_channel_surface_setup(
 	struct tegra_channel *chan, struct tegra_channel_buffer *buf, int index)
 {
 	int vnc_id = chan->vnc_id[index];
-	unsigned int offset = chan->buffer_offset[index];
+	u64 addr = 0;
+	u32 stride = 0;
 
 	if (chan->embedded_data_height > 0) {
-		vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_OFFSET0,
-						  chan->vi->emb_buf);
-		vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_OFFSET0_H,
-					  (chan->vi->emb_buf) >> 32 & 0xFF);
-	} else {
-		vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_OFFSET0, 0);
-		vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_OFFSET0_H, 0x0);
+		addr = chan->emb_buf;
+		stride = chan->embedded_data_width * BPP_MEM;
 	}
 
-	vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_STRIDE0,
-					  chan->embedded_data_width * BPP_MEM);
-	vi4_channel_write(chan, vnc_id,
-		ATOMP_SURFACE_OFFSET0, buf->addr + offset);
-	vi4_channel_write(chan, vnc_id,
-		ATOMP_SURFACE_STRIDE0,
-		chan->format.bytesperline * chan->interlace_bplfactor);
-	vi4_channel_write(chan, vnc_id,
-		ATOMP_SURFACE_OFFSET0_H, (buf->addr >> 32) & 0xFF);
+	vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_OFFSET0, addr);
+	vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_OFFSET0_H, addr >> 32);
+	vi4_channel_write(chan, vnc_id, ATOMP_EMB_SURFACE_STRIDE0, stride);
+
+	addr = buf->addr + chan->buffer_offset[index];
+	stride = chan->format.bytesperline * chan->interlace_bplfactor;
+
+	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET0, addr);
+	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET0_H, addr >> 32);
+	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_STRIDE0, stride);
 
 	if (chan->fmtinfo->fourcc == V4L2_PIX_FMT_NV16) {
-		vi4_channel_write(chan, vnc_id,
-			ATOMP_SURFACE_OFFSET1, buf->addr + offset +
-			chan->format.sizeimage / 2);
-		vi4_channel_write(chan, vnc_id,
-			ATOMP_SURFACE_OFFSET1_H, ((u64)buf->addr + offset +
-			chan->format.sizeimage / 2) >> 32);
-		vi4_channel_write(chan, vnc_id,
-			ATOMP_SURFACE_STRIDE1,
-			chan->format.bytesperline * chan->interlace_bplfactor);
-
+		addr += chan->format.sizeimage / 2;
 	} else {
-		vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET1, 0x0);
-		vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET1_H, 0x0);
-		vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_STRIDE1, 0x0);
+		addr = 0;
+		stride = 0;
 	}
+
+	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET1, addr);
+	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET1_H, addr >> 32);
+	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_STRIDE1, stride);
 
 	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET2, 0x0);
 	vi4_channel_write(chan, vnc_id, ATOMP_SURFACE_OFFSET2_H, 0x0);
@@ -346,16 +346,8 @@ static int tegra_channel_notify_enable(
 	struct tegra_channel *chan, unsigned int index)
 {
 	struct tegra_vi4_syncpts_req req;
-	int i, err;
+	int err;
 
-	chan->vnc_id[index] = -1;
-	for (i = 0; i < MAX_VI_CHANNEL; i++) {
-		chan->vnc[index] = vi_notify_channel_open(i);
-		if (!IS_ERR(chan->vnc[index])) {
-			chan->vnc_id[index] = i;
-			break;
-		}
-	}
 	if (chan->vnc_id[index] < 0) {
 		dev_err(chan->vi->dev, "No VI channel available!\n");
 		return -EFAULT;
@@ -437,14 +429,6 @@ static int tegra_channel_notify_disable(
 	if (err < 0) {
 		dev_err(chan->vi->dev,
 			"VI Notify channel reset failed, err = %d\n", err);
-		if (!ret)
-			ret = err;
-	}
-
-	err = vi_notify_channel_close(chan->vnc_id[index], chan->vnc[index]);
-	if (err < 0) {
-		dev_err(chan->vi->dev,
-			"VI Notify channel close failed, err = %d\n", err);
 		if (!ret)
 			ret = err;
 	}
@@ -541,7 +525,11 @@ static int tegra_channel_capture_frame_single_thread(
 			struct tegra_channel_buffer *buf)
 {
 	struct vb2_v4l2_buffer *vb = &buf->buf;
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 	struct timespec ts;
+#else
+	struct timespec64 ts;
+#endif
 	int state = VB2_BUF_STATE_DONE;
 	unsigned long flags;
 	int err = false;
@@ -605,8 +593,11 @@ static int tegra_channel_capture_frame_single_thread(
 		/* wait for vi notifier events */
 		if (!vi_notify_wait(chan, buf, &ts)) {
 			tegra_channel_error_recovery(chan);
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 			state = VB2_BUF_STATE_REQUEUEING;
+#else
+			state = VB2_BUF_STATE_ERROR;
+#endif
 
 			spin_lock_irqsave(&chan->capture_state_lock, flags);
 			chan->capture_state = CAPTURE_TIMEOUT;
@@ -624,7 +615,11 @@ static int tegra_channel_capture_frame_single_thread(
 
 	set_timestamp(buf, &ts);
 	tegra_channel_ring_buffer(chan, vb, &ts, state);
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 	trace_tegra_channel_capture_frame("sof", ts);
+#else
+	trace_tegra_channel_capture_frame("sof", &ts);
+#endif
 	return 0;
 }
 
@@ -632,7 +627,11 @@ static int tegra_channel_capture_frame_multi_thread(
 			struct tegra_channel *chan,
 			struct tegra_channel_buffer *buf)
 {
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 	struct timespec ts;
+#else
+	struct timespec64 ts;
+#endif
 	unsigned long flags;
 	bool is_streaming = atomic_read(&chan->is_streaming);
 	int restart_version = 0;
@@ -720,7 +719,11 @@ static void tegra_channel_release_frame(struct tegra_channel *chan,
 	 */
 	restart_version = atomic_read(&chan->restart_version);
 	if (buf->version != restart_version) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 		buf->state = VB2_BUF_STATE_REQUEUEING;
+#else
+		buf->state = VB2_BUF_STATE_ERROR;
+#endif
 		release_buffer(chan, buf);
 		return;
 	}
@@ -740,11 +743,15 @@ static void tegra_channel_release_frame(struct tegra_channel *chan,
 				"ATOMP_FE syncpt timeout! err = %d\n", err);
 		else
 			dev_dbg(&chan->video->dev,
-			"%s: vi4 got EOF syncpt buf[%p]\n", __func__, buf);
+				"%s: vi4 got EOF syncpt buf[%p]\n", __func__, buf);
 	}
 
 	if (err) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 		buf->state = VB2_BUF_STATE_REQUEUEING;
+#else
+		buf->state = VB2_BUF_STATE_ERROR;
+#endif
 		atomic_inc(&chan->restart_version);
 	}
 
@@ -801,7 +808,11 @@ static int tegra_channel_stop_increments(struct tegra_channel *chan)
 
 static void tegra_channel_capture_done(struct tegra_channel *chan)
 {
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 	struct timespec ts;
+#else
+	struct timespec64 ts;
+#endif
 	struct tegra_channel_buffer *buf;
 	int state = VB2_BUF_STATE_DONE;
 	u32 thresh[TEGRA_CSI_BLOCKS];
@@ -853,12 +864,20 @@ static void tegra_channel_capture_done(struct tegra_channel *chan)
 					"no capture status! err = %d\n", err);
 			break;
 		}
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 		ts = ns_to_timespec((s64)status.eof_ts);
+#else
+		ts = ns_to_timespec64((s64)status.eof_ts);
+#endif
 	}
 
 	if (err) {
 		tegra_channel_error_recovery(chan);
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 		state = VB2_BUF_STATE_REQUEUEING;
+#else
+		state = VB2_BUF_STATE_ERROR;
+#endif
 	}
 
 	set_timestamp(buf, &ts);
@@ -870,7 +889,11 @@ static void tegra_channel_capture_done(struct tegra_channel *chan)
 	else
 		tegra_channel_ring_buffer(chan, &buf->buf, &ts, state);
 
+#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
 	trace_tegra_channel_capture_done("eof", ts);
+#else
+	trace_tegra_channel_capture_done("eof", &ts);
+#endif
 }
 
 
@@ -988,24 +1011,13 @@ static void tegra_channel_stop_kthreads(struct tegra_channel *chan)
 static int vi4_channel_start_streaming(struct vb2_queue *vq, u32 count)
 {
 	struct tegra_channel *chan = vb2_get_drv_priv(vq);
-	/* WAR: With newer version pipe init has some race condition */
-	/* TODO: resolve this issue to block userspace not to cleanup media */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
-	struct media_pipeline *pipe = chan->video->entity.pipe;
-#endif
-	int ret = 0, i;
+	int ret = 0, i, chan_idx;
 	unsigned long flags;
 	struct v4l2_subdev *sd;
 	struct device_node *node;
 	struct sensor_mode_properties *sensor_mode;
 	struct camera_common_data *s_data;
 	unsigned int emb_buf_size = 0;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
-	ret = media_entity_pipeline_start(&chan->video->entity, pipe);
-	if (ret < 0)
-		goto error_pipeline_start;
-#endif
 
 	if (chan->bypass) {
 		ret = tegra_channel_set_stream(chan, true);
@@ -1053,34 +1065,42 @@ static int vi4_channel_start_streaming(struct vb2_queue *vq, u32 count)
 		}
 
 		/* Allocate buffer for Embedded Data if need to*/
-		if (emb_buf_size > chan->vi->emb_buf_size) {
+		if (emb_buf_size > chan->emb_buf_size) {
 			/*
 			 * if old buffer is smaller than what we need,
 			 * release the old buffer and re-allocate a bigger
 			 * one below
 			 */
-			if (chan->vi->emb_buf_size > 0) {
+			if (chan->emb_buf_size > 0) {
 				dma_free_coherent(chan->vi->dev,
-					chan->vi->emb_buf_size,
-					chan->vi->emb_buf_addr, chan->vi->emb_buf);
-				chan->vi->emb_buf_size = 0;
+					chan->emb_buf_size,
+					chan->emb_buf_addr, chan->emb_buf);
+				chan->emb_buf_size = 0;
 			}
 
-			chan->vi->emb_buf_addr =
+			chan->emb_buf_addr =
 				dma_alloc_coherent(chan->vi->dev,
 					emb_buf_size,
-					&chan->vi->emb_buf, GFP_KERNEL);
-			if (!chan->vi->emb_buf_addr) {
+					&chan->emb_buf, GFP_KERNEL);
+			if (!chan->emb_buf_addr) {
 				dev_err(&chan->video->dev,
 						"Can't allocate memory for embedded data\n");
 				goto error_capture_setup;
 			}
-			chan->vi->emb_buf_size = emb_buf_size;
+			chan->emb_buf_size = emb_buf_size;
 		}
 	}
 
-	for (i = 0; i < chan->valid_ports; i++) {
-		ret = tegra_channel_capture_setup(chan, i);
+	for (chan_idx = 0; chan_idx < chan->valid_ports; chan_idx++) {
+		chan->vnc_id[chan_idx] = -1;
+		for (i = 0; i < MAX_VI_CHANNEL; i++) {
+			chan->vnc[chan_idx] = vi_notify_channel_open(i);
+			if (!IS_ERR(chan->vnc[chan_idx])) {
+				chan->vnc_id[chan_idx] = i;
+				break;
+			}
+		}
+		ret = tegra_channel_capture_setup(chan, chan_idx);
 		if (ret < 0)
 			goto error_capture_setup;
 	}
@@ -1125,10 +1145,6 @@ error_capture_setup:
 		tegra_channel_write_blobs(chan);
 	}
 error_set_stream:
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
-	media_entity_pipeline_stop(&chan->video->entity);
-error_pipeline_start:
-#endif
 	vq->start_streaming_called = 0;
 	tegra_channel_queued_buf_done(chan, VB2_BUF_STATE_QUEUED,
 		chan->low_latency);
@@ -1161,6 +1177,7 @@ static int vi4_channel_stop_streaming(struct vb2_queue *vq)
 			vi4_channel_write(chan, chan->vnc_id[i],
 				CHANNEL_COMMAND, LOAD);
 			tegra_channel_notify_disable(chan, i);
+			vi_notify_channel_close(chan->vnc_id[i], chan->vnc[i]);
 		}
 		if (!chan->low_latency) {
 			/* free all the ring buffers */
@@ -1176,10 +1193,6 @@ static int vi4_channel_stop_streaming(struct vb2_queue *vq)
 	err = tegra_channel_write_blobs(chan);
 	if (err < 0)
 		return err;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
-	media_entity_pipeline_stop(&chan->video->entity);
-#endif
 
 	return 0;
 }
@@ -1255,12 +1268,10 @@ static int vi4_power_on(struct tegra_channel *chan)
 	if (ret < 0)
 		return ret;
 
-	if (atomic_add_return(1, &chan->power_on_refcnt) == 1) {
-		ret = tegra_channel_set_power(chan, 1);
-		if (ret < 0) {
-			dev_err(vi->dev, "Failed to power on subdevices\n");
-			return ret;
-		}
+	ret = tegra_channel_set_power(chan, true);
+	if (ret < 0) {
+		dev_err(vi->dev, "Failed to power on subdevices\n");
+		return ret;
 	}
 
 	return 0;
@@ -1275,11 +1286,9 @@ static void vi4_power_off(struct tegra_channel *chan)
 	vi = chan->vi;
 	csi = vi->csi;
 
-	if (atomic_dec_and_test(&chan->power_on_refcnt)) {
-		ret = tegra_channel_set_power(chan, 0);
-		if (ret < 0)
-			dev_err(vi->dev, "Failed to power off subdevices\n");
-	}
+	ret = tegra_channel_set_power(chan, 0);
+	if (ret < 0)
+		dev_err(vi->dev, "Failed to power off subdevices\n");
 
 	tegra_vi4_power_off(vi);
 	nvhost_module_remove_client(vi->ndev, chan->video);

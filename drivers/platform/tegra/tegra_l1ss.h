@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2022, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -9,7 +9,6 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
  */
 
 #ifndef _LINUX_TEGRA_SAFETY_TEGRA_L1SS_H
@@ -54,7 +53,7 @@ struct l1ss_data {
 	spinlock_t slock;
 	struct l1ss_req_node *head;
 	struct cdev cdev;
-	int dev_major;
+	unsigned int dev_major;
 	struct class *l1ss_class;
 	dev_t dev;
 	struct tegra_safety_ivc *safety_ivc;

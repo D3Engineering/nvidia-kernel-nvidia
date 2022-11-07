@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2018, NVIDIA Corporation. All rights reserved.
+ * Copyright (C) 2016-2021, NVIDIA Corporation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -49,8 +49,9 @@
  */
 #define EMC_PLLP_FREQ_MAX			204000
 
-enum actmon_devices {
-	MC_ALL, /* Should match with device sequence in dt */
+enum actmon_devices { /* Should match with device sequence in dt */
+	MC_ALL, /* instance 1 */
+	MC_CPU, /* instance 0 */
 	MAX_DEVICES,
 };
 
@@ -129,6 +130,9 @@ struct actmon_dev {
 	enum actmon_type type;
 	enum actmon_state state;
 	enum actmon_state saved_state;
+
+	bool bwmgr_disable;
+	struct clk *dram_clk_handle;
 
 	struct dev_reg_ops ops;
 	void (*actmon_dev_set_rate)(struct actmon_dev *, unsigned long);

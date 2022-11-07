@@ -1,7 +1,7 @@
 /*
  * camera_common.c - utilities for tegra camera driver
  *
- * Copyright (c) 2015-2021, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015-2022, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -23,7 +23,12 @@
 #include <linux/string.h>
 #include <soc/tegra/pmc.h>
 #include <trace/events/camera_common.h>
+#include <linux/version.h>
+#if KERNEL_VERSION(4, 15, 0) > LINUX_VERSION_CODE
 #include <soc/tegra/chip-id.h>
+#else
+#include <soc/tegra/fuse.h>
+#endif
 #include <soc/tegra/tegra-i2c-rtcpu.h>
 
 #include <asm/barrier.h>
@@ -55,6 +60,11 @@ static const struct camera_common_colorfmt camera_common_color_fmts[] = {
 		MEDIA_BUS_FMT_SGBRG12_1X12,
 		V4L2_COLORSPACE_SRGB,
 		V4L2_PIX_FMT_SGBRG12
+	},
+	{
+		MEDIA_BUS_FMT_SBGGR12_1X12,
+		V4L2_COLORSPACE_SRGB,
+		V4L2_PIX_FMT_SBGGR12
 	},
 	{
 		MEDIA_BUS_FMT_SRGGB10_1X10,
@@ -126,21 +136,6 @@ static const struct camera_common_colorfmt camera_common_color_fmts[] = {
 		V4L2_COLORSPACE_SRGB,
 		V4L2_PIX_FMT_VYUY,
 	},
-{
-		MEDIA_BUS_FMT_SBGGR12_1X12,
-		V4L2_COLORSPACE_SRGB,
-		V4L2_PIX_FMT_SBGGR12,
-	},
-	{
-		MEDIA_BUS_FMT_SGRBG12_1X12,
-		V4L2_COLORSPACE_SRGB,
-		V4L2_PIX_FMT_SGRBG12,
-	},
-	{
-		MEDIA_BUS_FMT_RGB888_1X24,
-		V4L2_COLORSPACE_SRGB,
-		V4L2_PIX_FMT_BGR24,
-	},
 	/*
 	 * The below two formats are not supported by VI4,
 	 * keep them at the last to ensure they get discarded
@@ -200,7 +195,7 @@ int camera_common_g_ctrl(struct camera_common_data *s_data,
 			return 0;
 		}
 	}
-	speculation_barrier(); /* break_spec_p#5_1 */
+	spec_bar();
 
 	return -EFAULT;
 }
@@ -246,9 +241,10 @@ int camera_common_parse_clocks(struct device *dev,
 	if (!err) {
 		dev_dbg(dev, "mclk in DT %s\n", pdata->mclk_name);
 		err = of_property_read_string(np, "parent-clk",
-					      &pdata->parentclk_name);
-		if (err)
-			dev_dbg(dev, "parent-clk not in DT \n");
+						  &pdata->parentclk_name);
+		if (err) {
+			dev_dbg(dev, "Failed to find parent-clk\n");
+		}
 		return 0;
 	}
 
@@ -539,7 +535,7 @@ static const struct camera_common_colorfmt *find_matching_color_fmt(
 break_loops:
 	if (match_num < index)
 		return NULL;
-	index = array_index_nospec(index, match_num); /* break_spec_p#1 */
+	index = array_index_nospec(index, match_num);
 	return &camera_common_color_fmts[match_index];
 }
 
@@ -602,7 +598,7 @@ static void select_mode(struct camera_common_data *s_data,
 			break;
 		}
 	}
-	speculation_barrier(); /* break_spec_p#5_1 */
+	spec_bar();
 }
 
 int camera_common_try_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
@@ -610,13 +606,18 @@ int camera_common_try_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
 	struct camera_common_data *s_data = to_camera_common_data(sd->dev);
 	struct tegra_channel *chan = v4l2_get_subdev_hostdata(sd);
 	struct v4l2_control hdr_control;
-	const struct camera_common_frmfmt *frmfmt = s_data->frmfmt;
+	const struct camera_common_frmfmt *frmfmt;
 	unsigned int mode_type = 0;
 	int err = 0;
 	int i;
 
 	dev_dbg(sd->dev, "%s: size %i x %i\n", __func__,
 		 mf->width, mf->height);
+
+	if (!s_data)
+		return -EINVAL;
+
+	frmfmt = s_data->frmfmt;
 
 	/* check hdr enable ctrl */
 	hdr_control.id = TEGRA_CAMERA_CID_HDR_EN;
@@ -664,7 +665,7 @@ int camera_common_try_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
 				break;
 			}
 		}
-		speculation_barrier(); /* break_spec_p#5_1 */
+		spec_bar();
 
 		if (i == s_data->numfmts) {
 			mf->width = s_data->fmt_width;
@@ -701,6 +702,9 @@ int camera_common_s_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
 	dev_dbg(sd->dev, "%s(%u) size %i x %i\n", __func__,
 			mf->code, mf->width, mf->height);
 
+	if (!s_data)
+		return -EINVAL;
+
 	/* MIPI CSI could have changed the format, double-check */
 	if (!camera_common_find_datafmt(mf->code))
 		return -EINVAL;
@@ -715,10 +719,16 @@ EXPORT_SYMBOL_GPL(camera_common_s_fmt);
 
 int camera_common_g_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf)
 {
-	struct camera_common_data *s_data = to_camera_common_data(sd->dev);
-	const struct camera_common_colorfmt *fmt = s_data->colorfmt;
+	struct camera_common_data *s_data;
+	const struct camera_common_colorfmt *fmt;
 
+	s_data = to_camera_common_data(sd->dev);
+	fmt = s_data->colorfmt;
 	dev_dbg(sd->dev, "%s++\n", __func__);
+
+	if (!s_data)
+		return -EINVAL;
+	fmt = s_data->colorfmt;
 
 	mf->code	= fmt->code;
 	mf->colorspace	= fmt->colorspace;
@@ -768,7 +778,7 @@ static int camera_common_evaluate_color_format(struct v4l2_subdev *sd,
 		if (cur_props->pixel_format == pixelformat)
 			return 0;
 	}
-	speculation_barrier(); /* break_spec_p#5_1 */
+	spec_bar();
 
 	if (i == sensor_num_modes) {
 		dev_dbg(s_data->dev,
@@ -830,9 +840,7 @@ int camera_common_enum_frameintervals(struct v4l2_subdev *sd,
 	if (i >= s_data->numfmts)
 		return -EINVAL;
 
-	i = array_index_nospec(i, s_data->numfmts); /* break_spec_p#1 */
-
-	/* Check index is in the range of framerates array index */
+	/* Check index is in the rage of framerates array index */
 	if (fie->index >= s_data->frmfmt[i].num_framerates)
 		return -EINVAL;
 	fie->index = array_index_nospec(fie->index,
@@ -894,14 +902,22 @@ void camera_common_dpd_disable(struct camera_common_data *s_data)
 	/* disable CSI IOs DPD mode to turn on camera */
 	for (i = 0; i < numports; i++) {
 		io_idx = s_data->csi_port + i;
+		if (io_idx < 0) {
+			spec_bar();
+			return;
+		}
 		if (atomic_inc_return(
 			&camera_common_csi_io_pads[io_idx].ref) == 1)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+			tegra_io_pad_power_enable(TEGRA_IO_PAD_CSIA + io_idx);
+#else
 			tegra_pmc_io_pad_low_power_disable(
 				camera_common_csi_io_pads[io_idx].name);
+#endif
 		dev_dbg(s_data->dev,
 			 "%s: csi %d\n", __func__, io_idx);
 	}
-	speculation_barrier(); /* break_spec_p#5_1 */
+	spec_bar();
 }
 
 void camera_common_dpd_enable(struct camera_common_data *s_data)
@@ -914,14 +930,22 @@ void camera_common_dpd_enable(struct camera_common_data *s_data)
 	/* disable CSI IOs DPD mode to turn on camera */
 	for (i = 0; i < numports; i++) {
 		io_idx = s_data->csi_port + i;
+		if (io_idx < 0) {
+			spec_bar();
+			return;
+		}
 		if (atomic_dec_return(
 			&camera_common_csi_io_pads[io_idx].ref) == 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+			tegra_io_pad_power_disable(TEGRA_IO_PAD_CSIA + io_idx);
+#else
 			tegra_pmc_io_pad_low_power_enable(
 				camera_common_csi_io_pads[io_idx].name);
+#endif
 		dev_dbg(s_data->dev,
 			 "%s: csi %d\n", __func__, io_idx);
 	}
-	speculation_barrier(); /* break_spec_p#5_1 */
+	spec_bar();
 }
 
 int camera_common_s_power(struct v4l2_subdev *sd, int on)
@@ -929,53 +953,77 @@ int camera_common_s_power(struct v4l2_subdev *sd, int on)
 	int err = 0;
 	struct camera_common_data *s_data = to_camera_common_data(sd->dev);
 
+	if (!s_data)
+		return -EINVAL;
+
 	trace_camera_common_s_power("status", on);
 	if (on) {
-		if (tegra_platform_is_silicon()) {
-			err = camera_common_mclk_enable(s_data);
-			if (err)
-				return err;
-
-			camera_common_dpd_disable(s_data);
-		}
 		err = call_s_op(s_data, power_on);
 		if (err) {
-			dev_err(s_data->dev,
-				"%s: error power on\n", __func__);
-			if (tegra_platform_is_silicon()) {
-				camera_common_dpd_enable(s_data);
-				camera_common_mclk_disable(s_data);
+			dev_err(s_data->dev, "%s: error power on\n", __func__);
+			return err;
+		}
+		if (tegra_platform_is_silicon()) {
+			err = camera_common_mclk_enable(s_data);
+			if (err) {
+				dev_err(s_data->dev,
+					"%s: failed to enable mclk\n",
+					__func__);
+				call_s_op(s_data, power_off);
+				return err;
 			}
+			camera_common_dpd_disable(s_data);
 		}
 	} else {
-		call_s_op(s_data, power_off);
 		if (tegra_platform_is_silicon()) {
 			camera_common_dpd_enable(s_data);
 			camera_common_mclk_disable(s_data);
 		}
+		call_s_op(s_data, power_off);
 	}
 
 	return err;
 }
 EXPORT_SYMBOL_GPL(camera_common_s_power);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 int camera_common_g_mbus_config(struct v4l2_subdev *sd,
 				struct v4l2_mbus_config *cfg)
+#else
+int camera_common_get_mbus_config(struct v4l2_subdev *sd,
+				unsigned int pad,
+				struct v4l2_mbus_config *cfg)
+#endif
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 	cfg->type = V4L2_MBUS_CSI2;
+#else
+	/*
+	 * TODO Bug 200664694: If the sensor type is CPHY
+	 *  then return an error
+	 */
+	cfg->type = V4L2_MBUS_CSI2_DPHY;
+#endif
 	cfg->flags = V4L2_MBUS_CSI2_4_LANE |
 		V4L2_MBUS_CSI2_CHANNEL_0 |
 		V4L2_MBUS_CSI2_CONTINUOUS_CLOCK;
 
 	return 0;
 }
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 EXPORT_SYMBOL_GPL(camera_common_g_mbus_config);
+#else
+EXPORT_SYMBOL_GPL(camera_common_get_mbus_config);
+#endif
 
 int camera_common_get_framesync(struct v4l2_subdev *sd,
 			struct camera_common_framesync *fs)
 {
 	struct camera_common_data *s_data = to_camera_common_data(sd->dev);
 	int err = -ENOTSUPP;
+
+	if (!s_data)
+		return -EINVAL;
 
 	if (has_s_op(s_data, get_framesync))
 		err = call_s_ops(s_data, get_framesync, fs);
@@ -1032,7 +1080,10 @@ int camera_common_initialize(struct camera_common_data *s_data,
 		return err;
 	}
 
-	sprintf(debugfs_name, "%s_%c", dev_name, s_data->csi_port + 'a');
+	err = sprintf(debugfs_name, "%s_%c", dev_name, s_data->csi_port + 'a');
+	if (err < 0)
+		return -EINVAL;
+
 	dev_dbg(s_data->dev, "%s_probe: name %s\n", dev_name, debugfs_name);
 
 	camera_common_create_debugfs(s_data, debugfs_name);

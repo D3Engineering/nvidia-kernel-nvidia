@@ -1,7 +1,7 @@
 /**
- * include/uapi/linux/nvhvivc_mempool_ioctl.h
+ * include/uapi/linux/imx219.h
  *
- * Copyright (c) 2016-2020, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2020, NVIDIA CORPORATION.  All rights reserved.
  *
  * NVIDIA Corporation and its licensors retain all intellectual property
  * and proprietary rights in and to this software and related documentation

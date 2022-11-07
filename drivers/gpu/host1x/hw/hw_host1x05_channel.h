@@ -1,18 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (C) 2016 NVIDIA CORPORATION.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
+ * Copyright (c) 2015 NVIDIA Corporation.
  */
 
  /*
@@ -51,81 +39,45 @@
 #ifndef HOST1X_HW_HOST1X05_CHANNEL_H
 #define HOST1X_HW_HOST1X05_CHANNEL_H
 
-static inline u32 host1x_channel_ch_aperture_start_r(void)
-{
-	return 0x10000;
-}
-#define HOST1X_CHANNEL_CH_APERTURE_START \
-	host1x_channel_ch_aperture_start_r()
-static inline u32 host1x_channel_ch_aperture_size_r(void)
-{
-	return 0x100;
-}
-#define HOST1X_CHANNEL_CH_APERTURE_SIZE \
-	host1x_channel_ch_aperture_size_r()
 static inline u32 host1x_channel_fifostat_r(void)
 {
-	return 0x24;
+	return 0x0;
 }
 #define HOST1X_CHANNEL_FIFOSTAT \
 	host1x_channel_fifostat_r()
 static inline u32 host1x_channel_fifostat_cfempty_v(u32 r)
 {
-	return (r >> 13) & 0x1;
+	return (r >> 11) & 0x1;
 }
 #define HOST1X_CHANNEL_FIFOSTAT_CFEMPTY_V(r) \
 	host1x_channel_fifostat_cfempty_v(r)
-static inline u32 host1x_channel_rdata_r(void)
-{
-	return 0x28;
-}
-#define HOST1X_CHANNEL_RDATA \
-	host1x_channel_rdata_r()
-static inline u32 host1x_channel_cmdp_offset_r(void)
-{
-	return 0x30;
-}
-#define HOST1X_CHANNEL_CMDP_OFFSET \
-	host1x_channel_cmdp_offset_r()
-static inline u32 host1x_channel_cmdp_class_r(void)
-{
-	return 0x34;
-}
-#define HOST1X_CHANNEL_CMDP_CLASS \
-	host1x_channel_cmdp_class_r()
-static inline u32 host1x_channel_cmdp_channelstat_r(void)
-{
-	return 0x38;
-}
-#define HOST1X_CHANNEL_CMDP_CHANNELSTAT \
-	host1x_channel_cmdp_channelstat_r()
 static inline u32 host1x_channel_dmastart_r(void)
 {
-	return 0x0;
+	return 0x14;
 }
 #define HOST1X_CHANNEL_DMASTART \
 	host1x_channel_dmastart_r()
 static inline u32 host1x_channel_dmaput_r(void)
 {
-	return 0x8;
+	return 0x18;
 }
 #define HOST1X_CHANNEL_DMAPUT \
 	host1x_channel_dmaput_r()
 static inline u32 host1x_channel_dmaget_r(void)
 {
-	return 0x10;
+	return 0x1c;
 }
 #define HOST1X_CHANNEL_DMAGET \
 	host1x_channel_dmaget_r()
 static inline u32 host1x_channel_dmaend_r(void)
 {
-	return 0x18;
+	return 0x20;
 }
 #define HOST1X_CHANNEL_DMAEND \
 	host1x_channel_dmaend_r()
 static inline u32 host1x_channel_dmactrl_r(void)
 {
-	return 0x20;
+	return 0x24;
 }
 #define HOST1X_CHANNEL_DMACTRL \
 	host1x_channel_dmactrl_r()
@@ -153,17 +105,17 @@ static inline u32 host1x_channel_dmactrl_dmainitget(void)
 }
 #define HOST1X_CHANNEL_DMACTRL_DMAINITGET \
 	host1x_channel_dmactrl_dmainitget()
-static inline u32 host1x_channel_smmu_streamid_r(void)
+static inline u32 host1x_channel_channelctrl_r(void)
 {
-	return 0x84;
+	return 0x98;
 }
-#define HOST1X_CHANNEL_SMMU_STREAMID \
-	host1x_channel_smmu_streamid_r()
-static inline u32 host1x_channel_filter_gbuffer_r(void)
+#define HOST1X_CHANNEL_CHANNELCTRL \
+	host1x_channel_channelctrl_r()
+static inline u32 host1x_channel_channelctrl_kernel_filter_gbuffer_f(u32 v)
 {
-	return 0x2020;
+	return (v & 0x1) << 2;
 }
-#define HOST1X_CHANNEL_FILTER_GBUFFER \
-	host1x_channel_filter_gbuffer_r()
+#define HOST1X_CHANNEL_CHANNELCTRL_KERNEL_FILTER_GBUFFER(v) \
+	host1x_channel_channelctrl_kernel_filter_gbuffer_f(v)
 
 #endif
